@@ -5,6 +5,6 @@
 #ifndef HTTPSERVER_HTTP_1_0_H
 #define HTTPSERVER_HTTP_1_0_H
 
-int handle_user_connection(int client_fd);
+void* handle_user_connection(void* client_fd_arg);
 
 #endif //HTTPSERVER_HTTP_1_0_H

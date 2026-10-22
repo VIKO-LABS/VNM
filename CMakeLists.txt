@@ -12,7 +12,9 @@ add_executable(http_1_0_server
         http1_x/http_1_0.c
         http1_x/http_1_0.h
         http1_x/parser_http_1_0.c
-        http1_x/parser_http_1_0.h)
+        http1_x/parser_http_1_0.h
+        http1_x/WorkerManager.c
+        http1_x/WorkerManager.h)
 
 # HTTP/1.0 Parser test executable
 add_executable(test_parser

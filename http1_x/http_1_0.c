@@ -9,14 +9,24 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdint.h>
+#include <pthread.h>
 
 #include "parser_http_1_0.h"
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
 #define BUFFER_SIZE 65536
+#define WORKER_THREAD_POOL_SIZE 5
 
-int handle_user_connection(int client_fd) {
+//worker1,worker2,worker3
+//available.pop()
+//workermanager.getavailableworker()
+
+pthread_t thread_pool[WORKER_THREAD_POOL_SIZE];
+
+void* handle_user_connection(void* client_fd_arg) {
+    int client_fd = (int)(intptr_t)client_fd_arg;
     char recieved_data[BUFFER_SIZE];
     int filled = 0;
     char *header_end = NULL;
@@ -79,12 +89,16 @@ int handle_user_connection(int client_fd) {
         "%s", strlen(body), body);
 
     write(client_fd, response, resp_len);
-    sleep(100);
+    printf("before\n");
+    sleep(300);
+    printf("released\n");
     close(client_fd);
-    return 0;
+    return NULL;
 }
 
 int main(int argc, char** argv) {
+    (void)argc;
+    (void)argv;
     int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (sock_fd < 0) {
         perror("socket creation failed");
@@ -103,6 +117,10 @@ int main(int argc, char** argv) {
     int listen_status = listen(sock_fd, 4);
     printf("bind status %d and listen status %d\n", bind_status, listen_status);
 
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+
     while (true) {
         int client_fd = accept(sock_fd, NULL, NULL); // waiting for client connection
         if (client_fd < 0) {
@@ -110,9 +128,11 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        handle_user_connection(client_fd);
+        pthread_t temp_worker;
+        pthread_create(&temp_worker, &attr, handle_user_connection, (void*)(intptr_t)client_fd);
     }
 
+    pthread_attr_destroy(&attr);
     close(sock_fd);
     return 0;
 }

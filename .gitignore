@@ -1,0 +1,14 @@
+build/
+cmake-build-debug/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+.idea/
+*.o
+*.a
+*.so
+httpServer
+test
+http1_x/servern
+http1_x/test_parser

@@ -12,3 +12,5 @@ httpServer
 test
 http1_x/servern
 http1_x/test_parser
+*.md
+docs/

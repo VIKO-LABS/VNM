@@ -5,7 +5,7 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -D_GNU_SOURCE")
 
 # Common include directories
-include_directories(http1_x http0_9)
+include_directories(http1_x http0_9 CoreEngine/forwardProxy)
 
 # HTTP/1.0 Server executable
 add_executable(http_1_0_server
@@ -14,7 +14,13 @@ add_executable(http_1_0_server
         http1_x/parser_http_1_0.c
         http1_x/parser_http_1_0.h
         http1_x/WorkerManager.c
-        http1_x/WorkerManager.h)
+        http1_x/WorkerManager.h
+        http1_x/outboundEngine.c
+        http1_x/outboundEngine.h
+        http1_x/toolkit.c
+        http1_x/toolkit.h
+        CoreEngine/forwardProxy/forwardProxy.c
+        CoreEngine/forwardProxy/forwardProxy.h)
 
 # HTTP/1.0 Parser test executable
 add_executable(test_parser

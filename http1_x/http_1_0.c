@@ -11,10 +11,15 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <pthread.h>
+#include <semaphore.h>
+#include "../CoreEngine/forwardProxy/forwardProxy.h"
 
 #include "parser_http_1_0.h"
+#include "toolkit.h"
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include "outboundEngine.h"
+#include <netdb.h>
 
 #define BUFFER_SIZE 65536
 #define WORKER_THREAD_POOL_SIZE 5
@@ -24,8 +29,10 @@
 //workermanager.getavailableworker()
 
 pthread_t thread_pool[WORKER_THREAD_POOL_SIZE];
+sem_t s;
 
 void* handle_user_connection(void* client_fd_arg) {
+    //sem_wait(&s); // Acquire semaphore to limit concurrent connections
     int client_fd = (int)(intptr_t)client_fd_arg;
     char recieved_data[BUFFER_SIZE];
     int filled = 0;
@@ -53,7 +60,7 @@ void* handle_user_connection(void* client_fd_arg) {
         // Case-insensitive search for Content-Length
         char *cl_ptr = strcasestr(recieved_data, "Content-Length:");
         if (cl_ptr != NULL) {
-            content_length = atoi(cl_ptr + 15);
+            content_length = atoi(cl_ptr + 15); //this context length is used to read all bodyy part since there are no body delimiter
         }
         printf("header content length is %d\n", content_length);
 
@@ -78,36 +85,70 @@ void* handle_user_connection(void* client_fd_arg) {
     //request header and body recieved and stored in recieved data
     HttpRequest req;
     parse_http_1_0(recieved_data,filled,&req);
-    printf("Total bytes received: %d\n", filled);
-    printf("request method \n");
-    int s = 0;
-    while (req.method[s]!='\0') {
-        printf("%c",req.method[s]);
-        s++;
+    // printf("Total bytes received: %d\n", filled);
+    // printf("request method \n");
+    // int s = 0;
+    // while (req.method[s]!='\0') {
+    //     printf("%c",req.method[s]);
+    //     s++;
+    // }
+    // printf("\n");
+
+
+    // mode is set to forward proxy
+    char upstream_ip[64];
+    uint16_t upstream_port;
+    HttpRequest outbound_req;
+    forward_proxy_transform_request(&req, &outbound_req, upstream_ip, sizeof(upstream_ip), &upstream_port);
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%u", upstream_port);
+    // Serialize only the rewritten headers into a small 4KB stack buffer
+    char header_buf[4096];
+    // Clear body from outbound_req temporarily so demapper only serializes headers
+    const char *orig_body = outbound_req.body;
+    size_t orig_body_len = outbound_req.body_len;
+    outbound_req.body = NULL;
+    outbound_req.body_len = 0;
+    struct addrinfo hints, *res;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;       // IPv4
+    hints.ai_socktype = SOCK_STREAM; // TCP
+    int dns_status = getaddrinfo(upstream_ip,port_str,&hints,&res);
+    if (dns_status != 0) {
+        fprintf(stderr, "DNS resolution failed for %s: %s\n", upstream_ip, gai_strerror(dns_status));
+        // Handle error (e.g. send 502 Bad Gateway to client_fd and close)
+        return NULL;
     }
-    printf("\n");
+    int header_len = request_demapper(&outbound_req, header_buf, sizeof(header_buf));
+
+    printf("target host: %s:%d, uri: %s\n", upstream_ip, upstream_port, outbound_req.uri);
+
+    int outstream_fd = outbound_connect_tcp(res);
+    if (outstream_fd >= 0) {
+        // Relays headers from header_buf and streams original body with zero memory copies
+        outbound_relay_split(outstream_fd, client_fd, header_buf, header_len, orig_body, orig_body_len);
+        outbound_close(outstream_fd);
+    }
 
     // Send a valid HTTP/1.0 response
-    const char *body = "<h1>Hello from C HTTP Server!</h1>\n";
-    char response[1024];
-    int resp_len = snprintf(response, sizeof(response),
-        "HTTP/1.0 200 OK\r\n"
-        "Content-Type: text/html\r\n"
-        "Content-Length: %zu\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-        "%s", strlen(body), body);
-
-    write(client_fd, response, resp_len);
-    printf("before\n");
-    sleep(300);
-    printf("released\n");
+    // const char *body = "<h1>Hello from C HTTP Server!</h1>\n";
+    // char response[1024];
+    // int resp_len = snprintf(response, sizeof(response),
+    //     "HTTP/1.0 200 OK\r\n"
+    //     "Content-Type: text/html\r\n"
+    //     "Content-Length: %zu\r\n"
+    //     "Connection: close\r\n"
+    //     "\r\n"
+    //     "%s", strlen(body), body);
+    //
+    // write(client_fd, response, resp_len);
     close(client_fd);
     return NULL;
 }
 
 int main() {
     //int argc, char** argv
+    sem_init(&s, 0, 1);
     int sock_fd = socket(AF_INET, SOCK_STREAM, 0); // when we call this kernel sace will create a struct of socket and sock object to hold ip, port and other meta data | and put it in the process's fd table and return the index to the userspace
     if (sock_fd < 0) {
         perror("socket creation failed");

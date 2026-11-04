@@ -3,11 +3,11 @@
 #include <string.h>
 #include <ctype.h>
 
-const char *get_header_value(const HttpRequest *req, const char *name) {
-    if (!req || !name) return NULL;
-    for (size_t i = 0; i < req->header_count; i++) {
-        if (strcasecmp(req->headers[i].name, name) == 0) {
-            return req->headers[i].value;
+const char *get_header_value(const HttpHeader *header, const char *name, const size_t header_count) {
+    if (!header || !name) return NULL;
+    for (size_t i = 0; i < header_count; i++) {
+        if (strcasecmp(header[i].name, name) == 0) {
+            return header[i].value;
         }
     }
     return NULL;

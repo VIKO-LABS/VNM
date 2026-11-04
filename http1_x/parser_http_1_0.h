@@ -41,6 +41,16 @@ typedef struct {
     int is_http_0_9;       /* 1 if fallback to HTTP/0.9 simple request */
 } HttpRequest;
 
+typedef struct {
+    char version[10];
+    int status_code;
+    char reason_phrase[64];
+    HttpHeader headers[32];
+    size_t header_count;
+    const char *body;
+    size_t body_len;
+} HttpResponse;
+
 /**
  * Parses an HTTP/1.0 request buffer.
  *
@@ -58,6 +68,7 @@ int parse_http_1_0(const char *input_buffer, size_t size, HttpRequest *req);
  * @param name  Header name (e.g. "Content-Length", "Host")
  * @return      Pointer to header value or NULL if not found
  */
-const char *get_header_value(const HttpRequest *req, const char *name);
+const char *get_header_value(const HttpHeader *header, const char *name, const size_t header_count);
+
 
 #endif /* PARSER_HTTP_1_0_H */

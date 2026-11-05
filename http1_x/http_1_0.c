@@ -63,7 +63,7 @@ void* handle_user_connection(void* client_fd_arg) {
         if (cl_ptr != NULL) {
             content_length = atoi(cl_ptr + 15); //this context length is used to read all bodyy part since there are no body delimiter
         }
-        printf("header content length is %d\n", content_length);
+        //printf("header content length is %d\n", content_length);
 
         if (content_length > 0) {
             // Bytes of the body that have already been read into the buffer

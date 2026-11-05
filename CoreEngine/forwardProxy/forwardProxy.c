@@ -3,8 +3,110 @@
 #include <string.h>
 #include <stdlib.h>
 #include <netdb.h>
+#include <sys/select.h>
+#include <unistd.h>
+#include "../../http1_x/toolkit.h"
+#include "../../http1_x/outboundEngine.h"
+
+#define TUNNEL_BUFFER_SIZE 65536
 #define HOST_SIZE 64
 #define PORT_SIZE 8
+
+
+void handle_request_through_tunnel(int clientfd,int outstream_fd) {
+    if (clientfd < 0 || outstream_fd < 0) {
+        return;
+    }
+    char buffer[TUNNEL_BUFFER_SIZE];
+    fd_set read_fds;
+    int max_fd = (clientfd > outstream_fd) ? clientfd : outstream_fd;
+    //int min_fd = (clientfd < outstream_fd) ? clientfd : outstream_fd;
+    while (1) {
+        FD_ZERO(&read_fds);
+        FD_SET(clientfd, &read_fds);
+        FD_SET(outstream_fd, &read_fds);
+        int triggered = select(max_fd+1,&read_fds,NULL,NULL,NULL);
+        if (triggered < 0) {
+            perror("select error");
+            break;
+        }
+        if (FD_ISSET(clientfd, &read_fds)) {
+            size_t r = read(clientfd, buffer, sizeof(buffer));
+            if (r <= 0) {
+                break; // Client closed connection or error because then only the r beome 0 or negative because read is a blocking call
+            }
+            size_t written = 0;
+            while (written<r) {
+                size_t w = write(outstream_fd, buffer + written, r - written);
+                if (w<=0) {
+                    return;
+                }
+                written+=w;
+            }
+        }
+        if (FD_ISSET(outstream_fd, &read_fds)) {
+            size_t r = read(outstream_fd, buffer, sizeof(buffer));
+            if (r <= 0) {
+                break; // Client closed connection or error because then only the r beome 0 or negative because read is a blocking call
+            }
+            size_t written = 0;
+            while (written<r) {
+                size_t w = write(clientfd, buffer + written, r - written);
+                if (w<=0) {
+                    return;
+                }
+                written+=w;
+            }
+        }
+
+    }
+    //readclientfd -> write outstremfd
+    //read outstreamfd -> write clientfd
+
+}
+void handle_request_through_http(int clientfd,int outstreamfd,HttpRequest *outbound_req) {
+    char header_buf[4096];
+    // Clear body from outbound_req temporarily so demapper only serializes headers
+    const char *orig_body = outbound_req->body;
+    size_t orig_body_len = outbound_req->body_len;
+    outbound_req->body = NULL;
+    outbound_req->body_len = 0;
+
+    int header_len = request_demapper(outbound_req, header_buf, sizeof(header_buf));
+    if (outstreamfd >= 0) {
+        // Relays headers from header_buf and streams original body with zero memory copies
+        outbound_relay_split(outstreamfd, clientfd, header_buf, header_len, orig_body, orig_body_len);
+        outbound_close(outstreamfd);
+    }
+
+}
+int handle_proxy_request(int clientfd,const HttpRequest *in_req) {
+    if (!in_req || !clientfd) {
+        return -1;
+    }
+    HttpRequest outbound_req;
+    struct addrinfo *res = NULL;
+    int transform_status = forward_proxy_transform_request(in_req, &outbound_req, &res);
+    if (transform_status != 0 || !res) {
+        return -1;
+    }
+    int outstream_fd = outbound_connect_tcp(res);
+    if (strcmp(outbound_req.method, "CONNECT") == 0) {
+        const char *ok_msg = "HTTP/1.1 200 Connection Established\r\n\r\n";
+        write(clientfd, ok_msg, strlen(ok_msg));
+        handle_request_through_tunnel(clientfd,outstream_fd);
+        close(outstream_fd);
+        return 0;
+    }
+    handle_request_through_http(clientfd,outstream_fd,&outbound_req);
+    freeaddrinfo(res);
+    close(outstream_fd);
+
+
+    return 0;
+}
+
+
 
 int forward_proxy_transform_request(const HttpRequest *in_req,
                                     HttpRequest *out_req,

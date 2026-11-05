@@ -53,6 +53,7 @@ int parse_http_1_0(const char *input_buffer, size_t size, HttpRequest *req) {
                         return -1;
                     }
                 }
+                //check whether the method is CONNECT or NOT
                 break;
 
             case PARSER_STATE_URI:

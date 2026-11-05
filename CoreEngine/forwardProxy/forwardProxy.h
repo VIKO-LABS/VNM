@@ -23,5 +23,6 @@
 int forward_proxy_transform_request(const HttpRequest *in_req,
                                     HttpRequest *out_req,
                                     struct addrinfo **res);
+int handle_proxy_request(int clientfd, const HttpRequest *in_req);
 
 #endif // COREENGINE_FORWARD_PROXY_H

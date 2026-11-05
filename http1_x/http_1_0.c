@@ -85,36 +85,48 @@ void* handle_user_connection(void* client_fd_arg) {
     //request header and body recieved and stored in recieved data
     HttpRequest req;
     parse_http_1_0(recieved_data,filled,&req);
-
-    print_buffer(recieved_data,filled);
-    // mode is set to forward proxy
-    HttpRequest outbound_req;
-    struct addrinfo *res = NULL;
-    int transform_status = forward_proxy_transform_request(&req, &outbound_req, &res);
-    if (transform_status != 0 || !res) {
+    if (req.state == PARSER_STATE_REJECTED) {
+        printf("Request parsing failed. Rejecting connection.\n");
         close(client_fd);
         return NULL;
     }
+    int config_proxy = 1; //from configuration (vsi configuration)
+    if (config_proxy==1) {
+        handle_proxy_request(client_fd, &req);
+        return NULL;
+    }
 
-    // Serialize only the rewritten headers into a small 4KB stack buffer
-    char header_buf[4096];
-    // Clear body from outbound_req temporarily so demapper only serializes headers
-    const char *orig_body = outbound_req.body;
-    size_t orig_body_len = outbound_req.body_len;
-    outbound_req.body = NULL;
-    outbound_req.body_len = 0;
+    // //check whether the method is connect or not if it not leave it else parse it to pro
+    //
+    // print_buffer(recieved_data,filled);
+    // // mode is set to forward proxy
+    // HttpRequest outbound_req;
+    // struct addrinfo *res = NULL;
+    // int transform_status = forward_proxy_transform_request(&req, &outbound_req, &res);
+    // if (transform_status != 0 || !res) {
+    //     close(client_fd);
+    //     return NULL;
+    // }
 
-    int header_len = request_demapper(&outbound_req, header_buf, sizeof(header_buf));
+    // // Serialize only the rewritten headers into a small 4KB stack buffer
+    // char header_buf[4096];
+    // // Clear body from outbound_req temporarily so demapper only serializes headers
+    // const char *orig_body = outbound_req.body;
+    // size_t orig_body_len = outbound_req.body_len;
+    // outbound_req.body = NULL;
+    // outbound_req.body_len = 0;
+    //
+    // int header_len = request_demapper(&outbound_req, header_buf, sizeof(header_buf));
 
     //printf("target host: %s:%d, uri: %s\n", upstream_ip, upstream_port, outbound_req.uri);
 
-    int outstream_fd = outbound_connect_tcp(res);
-    freeaddrinfo(res);
-    if (outstream_fd >= 0) {
-        // Relays headers from header_buf and streams original body with zero memory copies
-        outbound_relay_split(outstream_fd, client_fd, header_buf, header_len, orig_body, orig_body_len);
-        outbound_close(outstream_fd);
-    }
+    // int outstream_fd = outbound_connect_tcp(res);
+    // freeaddrinfo(res);
+    // if (outstream_fd >= 0) {
+    //     // Relays headers from header_buf and streams original body with zero memory copies
+    //     outbound_relay_split(outstream_fd, client_fd, header_buf, header_len, orig_body, orig_body_len);
+    //     outbound_close(outstream_fd);
+    // }
 
     close(client_fd);
     return NULL;

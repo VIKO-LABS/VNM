@@ -2,6 +2,7 @@
 #define COREENGINE_FORWARD_PROXY_H
 
 #include "../../http1_x/parser_http_1_0.h"
+#include <netdb.h>
 #include <stdint.h>
 
 /**
@@ -21,8 +22,6 @@
  */
 int forward_proxy_transform_request(const HttpRequest *in_req,
                                     HttpRequest *out_req,
-                                    char *target_host,
-                                    size_t host_len,
-                                    uint16_t *target_port);
+                                    struct addrinfo **res);
 
 #endif // COREENGINE_FORWARD_PROXY_H

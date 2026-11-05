@@ -2,22 +2,23 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <netdb.h>
+#define HOST_SIZE 64
+#define PORT_SIZE 8
 
 int forward_proxy_transform_request(const HttpRequest *in_req,
                                     HttpRequest *out_req,
-                                    char *target_host,
-                                    size_t host_len,
-                                    uint16_t *target_port) {
-    if (!in_req || !out_req || !target_host || host_len == 0 || !target_port) {
+                                    struct addrinfo **res) {
+    if (!in_req || !out_req || !res) {
         return -1;
     }
+    char target_port[PORT_SIZE];
+    char target_host[HOST_SIZE];
 
     // Initialize the outbound request
     memset(out_req, 0, sizeof(HttpRequest));
     strncpy(out_req->method, in_req->method, sizeof(out_req->method) - 1);
     strncpy(out_req->version, in_req->version, sizeof(out_req->version) - 1);
-
-    *target_port = 80; // Default HTTP port
 
     // Step 1: Parse absolute URI (e.g. "http://192.168.8.111:3000/favicon.ico")
     const char *uri_ptr = in_req->uri;
@@ -29,17 +30,25 @@ int forward_proxy_transform_request(const HttpRequest *in_req,
         const char *colon_ptr = strchr(host_start, ':');
 
         if (colon_ptr && (!slash_ptr || colon_ptr < slash_ptr)) {
-            // Port is present: "192.168.8.111:3000/..."
+            // Host is between host_start and colon_ptr
             size_t hlen = colon_ptr - host_start;
-            if (hlen >= host_len) hlen = host_len - 1;
+            if (hlen >= HOST_SIZE) hlen = HOST_SIZE - 1;
             strncpy(target_host, host_start, hlen);
             target_host[hlen] = '\0';
 
-            *target_port = (uint16_t)atoi(colon_ptr + 1);
+            // Port string is between colon_ptr + 1 and slash_ptr
+            const char *port_start = colon_ptr + 1;
+            size_t plen = slash_ptr ? (size_t)(slash_ptr - port_start) : strlen(port_start);
+            if (plen >= PORT_SIZE) plen = PORT_SIZE - 1;
+            strncpy(target_port, port_start, plen);
+            target_port[plen] = '\0';
         } else {
-            // No port in URI: "192.168.8.111/..."
+            // No port in URI -> Default HTTP port "80"
+            strncpy(target_port, "80", PORT_SIZE - 1);
+            target_port[PORT_SIZE - 1] = '\0';
+
             size_t hlen = slash_ptr ? (size_t)(slash_ptr - host_start) : strlen(host_start);
-            if (hlen >= host_len) hlen = host_len - 1;
+            if (hlen >= HOST_SIZE) hlen = HOST_SIZE - 1;
             strncpy(target_host, host_start, hlen);
             target_host[hlen] = '\0';
         }
@@ -48,19 +57,23 @@ int forward_proxy_transform_request(const HttpRequest *in_req,
     } else {
         // Fallback: If already relative, copy as is and fallback host to Host header
         path_start = in_req->uri[0] == '/' ? in_req->uri : "/";
+        strncpy(target_port, "80", PORT_SIZE - 1);
+        target_port[PORT_SIZE - 1] = '\0';
 
         const char *host_val = get_header_value(in_req->headers, "Host", in_req->header_count);
         if (host_val) {
             const char *colon = strchr(host_val, ':');
             if (colon) {
                 size_t hlen = colon - host_val;
-                if (hlen >= host_len) hlen = host_len - 1;
+                if (hlen >= HOST_SIZE) hlen = HOST_SIZE - 1;
                 strncpy(target_host, host_val, hlen);
                 target_host[hlen] = '\0';
-                *target_port = (uint16_t)atoi(colon + 1);
+
+                strncpy(target_port, colon + 1, PORT_SIZE - 1);
+                target_port[PORT_SIZE - 1] = '\0';
             } else {
-                strncpy(target_host, host_val, host_len - 1);
-                target_host[host_len - 1] = '\0';
+                strncpy(target_host, host_val, HOST_SIZE - 1);
+                target_host[HOST_SIZE - 1] = '\0';
             }
         }
     }
@@ -88,6 +101,18 @@ int forward_proxy_transform_request(const HttpRequest *in_req,
         out_hcount++;
     }
     out_req->header_count = out_hcount;
+
+    // Resolve DNS using clean target_host and target_port string
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;       // IPv4
+    hints.ai_socktype = SOCK_STREAM; // TCP
+
+    int dns_status = getaddrinfo(target_host, target_port, &hints, res);
+    if (dns_status != 0) {
+        fprintf(stderr, "DNS resolution failed for %s:%s: %s\n", target_host, target_port, gai_strerror(dns_status));
+        return -1;
+    }
 
     // Step 4: Link body if present
     out_req->body = in_req->body;

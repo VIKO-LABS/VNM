@@ -85,23 +85,17 @@ void* handle_user_connection(void* client_fd_arg) {
     //request header and body recieved and stored in recieved data
     HttpRequest req;
     parse_http_1_0(recieved_data,filled,&req);
-    // printf("Total bytes received: %d\n", filled);
-    // printf("request method \n");
-    // int s = 0;
-    // while (req.method[s]!='\0') {
-    //     printf("%c",req.method[s]);
-    //     s++;
-    // }
-    // printf("\n");
 
-
+    print_buffer(recieved_data,filled);
     // mode is set to forward proxy
-    char upstream_ip[64];
-    uint16_t upstream_port;
     HttpRequest outbound_req;
-    forward_proxy_transform_request(&req, &outbound_req, upstream_ip, sizeof(upstream_ip), &upstream_port);
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%u", upstream_port);
+    struct addrinfo *res = NULL;
+    int transform_status = forward_proxy_transform_request(&req, &outbound_req, &res);
+    if (transform_status != 0 || !res) {
+        close(client_fd);
+        return NULL;
+    }
+
     // Serialize only the rewritten headers into a small 4KB stack buffer
     char header_buf[4096];
     // Clear body from outbound_req temporarily so demapper only serializes headers
@@ -109,39 +103,19 @@ void* handle_user_connection(void* client_fd_arg) {
     size_t orig_body_len = outbound_req.body_len;
     outbound_req.body = NULL;
     outbound_req.body_len = 0;
-    struct addrinfo hints, *res;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;       // IPv4
-    hints.ai_socktype = SOCK_STREAM; // TCP
-    int dns_status = getaddrinfo(upstream_ip,port_str,&hints,&res);
-    if (dns_status != 0) {
-        fprintf(stderr, "DNS resolution failed for %s: %s\n", upstream_ip, gai_strerror(dns_status));
-        // Handle error (e.g. send 502 Bad Gateway to client_fd and close)
-        return NULL;
-    }
+
     int header_len = request_demapper(&outbound_req, header_buf, sizeof(header_buf));
 
-    printf("target host: %s:%d, uri: %s\n", upstream_ip, upstream_port, outbound_req.uri);
+    //printf("target host: %s:%d, uri: %s\n", upstream_ip, upstream_port, outbound_req.uri);
 
     int outstream_fd = outbound_connect_tcp(res);
+    freeaddrinfo(res);
     if (outstream_fd >= 0) {
         // Relays headers from header_buf and streams original body with zero memory copies
         outbound_relay_split(outstream_fd, client_fd, header_buf, header_len, orig_body, orig_body_len);
         outbound_close(outstream_fd);
     }
 
-    // Send a valid HTTP/1.0 response
-    // const char *body = "<h1>Hello from C HTTP Server!</h1>\n";
-    // char response[1024];
-    // int resp_len = snprintf(response, sizeof(response),
-    //     "HTTP/1.0 200 OK\r\n"
-    //     "Content-Type: text/html\r\n"
-    //     "Content-Length: %zu\r\n"
-    //     "Connection: close\r\n"
-    //     "\r\n"
-    //     "%s", strlen(body), body);
-    //
-    // write(client_fd, response, resp_len);
     close(client_fd);
     return NULL;
 }

@@ -24,6 +24,7 @@ int outbound_connect_tcp(const struct addrinfo *req) {
         close(upstream_fd);
         return -1;
     }
+    // printf("connection established");
 
     return upstream_fd;
 }

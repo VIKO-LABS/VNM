@@ -35,6 +35,7 @@ void handle_request_through_tunnel(int clientfd,int outstream_fd) {
             if (r <= 0) {
                 break; // Client closed connection or error
             }
+            print_tls_handshake(buffer, (size_t)r);
             size_t written = 0;
             while (written < (size_t)r) {
                 ssize_t w = write(outstream_fd, buffer + written, (size_t)r - written);
@@ -49,6 +50,7 @@ void handle_request_through_tunnel(int clientfd,int outstream_fd) {
             if (r <= 0) {
                 break; // Upstream closed connection or error
             }
+            print_tls_handshake(buffer, (size_t)r);
             size_t written = 0;
             while (written < (size_t)r) {
                 ssize_t w = write(clientfd, buffer + written, (size_t)r - written);

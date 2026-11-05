@@ -85,6 +85,7 @@ void* handle_user_connection(void* client_fd_arg) {
     }
     //request header and body recieved and stored in recieved data
     HttpRequest req;
+    print_buffer(recieved_data,filled);
     parse_http_1_0(recieved_data,filled,&req);
     if (req.state == PARSER_STATE_REJECTED) {
         printf("Request parsing failed. Rejecting connection.\n");

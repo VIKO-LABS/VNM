@@ -3,6 +3,7 @@
 
 #include "parser_http_1_0.h"
 #include <stddef.h>
+#include <stdint.h>
 
 /**
  * Maps raw HTTP request byte buffer into an HttpRequest struct.
@@ -52,5 +53,15 @@ int response_demapper(const HttpResponse *res, char *output_buffer, size_t buffe
  * @param size   Number of bytes to print
  */
 void print_buffer(const char *buffer, size_t size);
+
+/**
+ * Inspects and prints a human-readable breakdown of a TLS handshake message
+ * (e.g. TLS Client Hello or Server Hello), extracting TLS version, ciphers,
+ * and SNI (Server Name Indication) domain name directly from raw wire bytes.
+ *
+ * @param buffer Raw byte buffer received on the socket
+ * @param size   Number of bytes in the buffer
+ */
+void print_tls_handshake(const char *buffer, size_t size);
 
 #endif // HTTPSERVER_TOOLKIT_H

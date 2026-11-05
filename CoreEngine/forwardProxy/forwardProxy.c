@@ -31,31 +31,31 @@ void handle_request_through_tunnel(int clientfd,int outstream_fd) {
             break;
         }
         if (FD_ISSET(clientfd, &read_fds)) {
-            size_t r = read(clientfd, buffer, sizeof(buffer));
+            ssize_t r = read(clientfd, buffer, sizeof(buffer));
             if (r <= 0) {
-                break; // Client closed connection or error because then only the r beome 0 or negative because read is a blocking call
+                break; // Client closed connection or error
             }
             size_t written = 0;
-            while (written<r) {
-                size_t w = write(outstream_fd, buffer + written, r - written);
-                if (w<=0) {
+            while (written < (size_t)r) {
+                ssize_t w = write(outstream_fd, buffer + written, (size_t)r - written);
+                if (w <= 0) {
                     return;
                 }
-                written+=w;
+                written += (size_t)w;
             }
         }
         if (FD_ISSET(outstream_fd, &read_fds)) {
-            size_t r = read(outstream_fd, buffer, sizeof(buffer));
+            ssize_t r = read(outstream_fd, buffer, sizeof(buffer));
             if (r <= 0) {
-                break; // Client closed connection or error because then only the r beome 0 or negative because read is a blocking call
+                break; // Upstream closed connection or error
             }
             size_t written = 0;
-            while (written<r) {
-                size_t w = write(clientfd, buffer + written, r - written);
-                if (w<=0) {
+            while (written < (size_t)r) {
+                ssize_t w = write(clientfd, buffer + written, (size_t)r - written);
+                if (w <= 0) {
                     return;
                 }
-                written+=w;
+                written += (size_t)w;
             }
         }
 
@@ -81,7 +81,7 @@ void handle_request_through_http(int clientfd,int outstreamfd,HttpRequest *outbo
 
 }
 int handle_proxy_request(int clientfd,const HttpRequest *in_req) {
-    if (!in_req || !clientfd) {
+    if (!in_req || clientfd < 0) {
         return -1;
     }
     HttpRequest outbound_req;
@@ -91,17 +91,20 @@ int handle_proxy_request(int clientfd,const HttpRequest *in_req) {
         return -1;
     }
     int outstream_fd = outbound_connect_tcp(res);
+    if (outstream_fd < 0) {
+        freeaddrinfo(res);
+        return -1;
+    }
     if (strcmp(outbound_req.method, "CONNECT") == 0) {
         const char *ok_msg = "HTTP/1.1 200 Connection Established\r\n\r\n";
         write(clientfd, ok_msg, strlen(ok_msg));
         handle_request_through_tunnel(clientfd,outstream_fd);
         close(outstream_fd);
+        freeaddrinfo(res);
         return 0;
     }
     handle_request_through_http(clientfd,outstream_fd,&outbound_req);
     freeaddrinfo(res);
-    close(outstream_fd);
-
 
     return 0;
 }
@@ -122,11 +125,30 @@ int forward_proxy_transform_request(const HttpRequest *in_req,
     strncpy(out_req->method, in_req->method, sizeof(out_req->method) - 1);
     strncpy(out_req->version, in_req->version, sizeof(out_req->version) - 1);
 
-    // Step 1: Parse absolute URI (e.g. "http://192.168.8.111:3000/favicon.ico")
+    // Step 1: Parse URI
     const char *uri_ptr = in_req->uri;
     const char *path_start = NULL;
 
-    if (strncasecmp(uri_ptr, "http://", 7) == 0) {
+    if (strcasecmp(in_req->method, "CONNECT") == 0) {
+        // Authority-form for CONNECT tunneling (e.g. "www.google.com:443" or "example.com:443")
+        const char *colon_ptr = strchr(uri_ptr, ':');
+        if (colon_ptr) {
+            size_t hlen = colon_ptr - uri_ptr;
+            if (hlen >= HOST_SIZE) hlen = HOST_SIZE - 1;
+            strncpy(target_host, uri_ptr, hlen);
+            target_host[hlen] = '\0';
+
+            strncpy(target_port, colon_ptr + 1, PORT_SIZE - 1);
+            target_port[PORT_SIZE - 1] = '\0';
+        } else {
+            strncpy(target_host, uri_ptr, HOST_SIZE - 1);
+            target_host[HOST_SIZE - 1] = '\0';
+
+            strncpy(target_port, "443", PORT_SIZE - 1);
+            target_port[PORT_SIZE - 1] = '\0';
+        }
+        path_start = "/";
+    } else if (strncasecmp(uri_ptr, "http://", 7) == 0) {
         const char *host_start = uri_ptr + 7;
         const char *slash_ptr = strchr(host_start, '/');
         const char *colon_ptr = strchr(host_start, ':');

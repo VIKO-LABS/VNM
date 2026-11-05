@@ -10,6 +10,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <signal.h>
 #include <pthread.h>
 #include <semaphore.h>
 #include "../CoreEngine/forwardProxy/forwardProxy.h"
@@ -93,6 +94,7 @@ void* handle_user_connection(void* client_fd_arg) {
     int config_proxy = 1; //from configuration (vsi configuration)
     if (config_proxy==1) {
         handle_proxy_request(client_fd, &req);
+        close(client_fd);
         return NULL;
     }
 
@@ -134,6 +136,7 @@ void* handle_user_connection(void* client_fd_arg) {
 
 int main() {
     //int argc, char** argv
+    signal(SIGPIPE, SIG_IGN); //whenn browser closes the socket if outbount wriite anthng to socket it will make SIGPIPE call with close the process without console anything so this will mitigate that
     sem_init(&s, 0, 1);
     int sock_fd = socket(AF_INET, SOCK_STREAM, 0); // when we call this kernel sace will create a struct of socket and sock object to hold ip, port and other meta data | and put it in the process's fd table and return the index to the userspace
     if (sock_fd < 0) {

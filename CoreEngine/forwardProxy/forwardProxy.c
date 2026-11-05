@@ -104,6 +104,8 @@ int handle_proxy_request(int clientfd,const HttpRequest *in_req) {
         return 0;
     }
     handle_request_through_http(clientfd,outstream_fd,&outbound_req);
+    // handle_request_through_tunnel(clientfd,outstream_fd);
+    close(outstream_fd);
     freeaddrinfo(res);
 
     return 0;

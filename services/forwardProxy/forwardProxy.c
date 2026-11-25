@@ -5,8 +5,9 @@
 #include <netdb.h>
 #include <sys/select.h>
 #include <unistd.h>
-#include "../../http1_x/toolkit.h"
+#include "../../utils/toolkit.h"
 #include "../../http1_x/outboundEngine.h"
+#include "../../http1_x/http1_codec.h"
 
 #define TUNNEL_BUFFER_SIZE 65536
 #define HOST_SIZE 64
@@ -21,11 +22,13 @@ void handle_request_through_tunnel(int clientfd,int outstream_fd) {
     fd_set read_fds;
     int max_fd = (clientfd > outstream_fd) ? clientfd : outstream_fd;
     //int min_fd = (clientfd < outstream_fd) ? clientfd : outstream_fd;
+    //int cc = 0;
     while (1) {
         FD_ZERO(&read_fds);
         FD_SET(clientfd, &read_fds);
         FD_SET(outstream_fd, &read_fds);
         int triggered = select(max_fd+1,&read_fds,NULL,NULL,NULL);
+        //printf("transaction count is %d\n",++cc);
         if (triggered < 0) {
             perror("select error");
             break;
@@ -35,7 +38,7 @@ void handle_request_through_tunnel(int clientfd,int outstream_fd) {
             if (r <= 0) {
                 break; // Client closed connection or error
             }
-            print_tls_handshake(buffer, (size_t)r);
+            //print_tls_handshake(buffer, (size_t)r);
             size_t written = 0;
             while (written < (size_t)r) {
                 ssize_t w = write(outstream_fd, buffer + written, (size_t)r - written);
@@ -50,7 +53,7 @@ void handle_request_through_tunnel(int clientfd,int outstream_fd) {
             if (r <= 0) {
                 break; // Upstream closed connection or error
             }
-            print_tls_handshake(buffer, (size_t)r);
+            //print_tls_handshake(buffer, (size_t)r);
             size_t written = 0;
             while (written < (size_t)r) {
                 ssize_t w = write(clientfd, buffer + written, (size_t)r - written);
@@ -111,6 +114,21 @@ int handle_proxy_request(int clientfd,const HttpRequest *in_req) {
     freeaddrinfo(res);
 
     return 0;
+}
+
+void forward_proxy_on_connection(int client_fd) {
+    if (client_fd < 0) {
+        return;
+    }
+
+    char buffer[HTTP1_READ_BUFFER_SIZE];
+    HttpRequest req;
+
+    if (http1_read_and_parse_request(client_fd, buffer, sizeof(buffer), &req) == 0) {
+        handle_proxy_request(client_fd, &req);
+    }
+
+    close(client_fd);
 }
 
 

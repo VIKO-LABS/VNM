@@ -25,4 +25,13 @@ int forward_proxy_transform_request(const HttpRequest *in_req,
                                     struct addrinfo **res);
 int handle_proxy_request(int clientfd, const HttpRequest *in_req);
 
+/**
+ * Service entry point wired to the L4 transport layer.
+ * Reads and parses the incoming HTTP/1.x request via http1_codec,
+ * runs forward proxy handling, and closes client_fd on completion.
+ *
+ * @param client_fd Accepted client socket file descriptor
+ */
+void forward_proxy_on_connection(int client_fd);
+
 #endif // COREENGINE_FORWARD_PROXY_H

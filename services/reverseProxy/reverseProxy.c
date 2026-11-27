@@ -160,6 +160,21 @@ static int rewrite_and_relay_response(int upstream_fd,
     return 0;
 }
 
+static int resolve_backend_addr(const vsi_rp_mapping_t *mapping, struct addrinfo **res) {
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    int dns_status = getaddrinfo(mapping->target_host, mapping->target_port, &hints, res);
+    if (dns_status != 0) {
+        fprintf(stderr, "[REVERSE_PROXY] DNS resolution failed for %s:%s: %s\n",
+                mapping->target_host, mapping->target_port, gai_strerror(dns_status));
+        return -1;
+    }
+    return 0;
+}
+
 int reverse_proxy_transform_request(const HttpRequest *in_req,
                                     const vsi_rp_mapping_t *mapping,
                                     HttpRequest *out_req,
@@ -177,7 +192,7 @@ int reverse_proxy_transform_request(const HttpRequest *in_req,
             snprintf(orig_host, orig_host_size, "%s", incoming_host);
         }
     }
-
+    //here why did you unnnessarly create new outbound request instead of changeing the required places in the incomming request . memory allocation and assignment requies time .anyways have this as v1 and implement v2 that get these details asynchrounsly hle change the field n the request itself
     memset(out_req, 0, sizeof(HttpRequest));
     snprintf(out_req->method, sizeof(out_req->method), "%s", in_req->method);
     snprintf(out_req->uri, sizeof(out_req->uri), "%s", in_req->uri[0] != '\0' ? in_req->uri : "/");
@@ -225,34 +240,107 @@ int reverse_proxy_transform_request(const HttpRequest *in_req,
     out_req->body = in_req->body;
     out_req->body_len = in_req->body_len;
 
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
+    return resolve_backend_addr(mapping, res);
+}
 
-    int dns_status = getaddrinfo(mapping->target_host, mapping->target_port, &hints, res);
-    if (dns_status != 0) {
-        fprintf(stderr, "[REVERSE_PROXY] DNS resolution failed for %s:%s: %s\n",
-                mapping->target_host, mapping->target_port, gai_strerror(dns_status));
+int reverse_proxy_transform_request_v2(HttpRequest *req,
+                                       const vsi_rp_mapping_t *mapping,
+                                       char *orig_host,
+                                       size_t orig_host_size,
+                                       struct addrinfo **res) {
+    if (!req || !mapping || !res) {
         return -1;
     }
 
-    return 0;
+    if (orig_host && orig_host_size > 0) {
+        orig_host[0] = '\0';
+    }
+
+    if (req->uri[0] == '\0') {
+        snprintf(req->uri, sizeof(req->uri), "/");
+    }
+    if (req->version[0] == '\0') {
+        snprintf(req->version, sizeof(req->version), "HTTP/1.1");
+    }
+
+    char mapped_host[VSI_RP_HOST_SIZE + VSI_RP_PORT_SIZE + 2];
+    format_host_port(mapping, mapped_host, sizeof(mapped_host));
+
+    size_t write_idx = 0;
+    int host_replaced = 0;
+    int conn_replaced = 0;
+
+    for (size_t i = 0; i < req->header_count && i < MAX_HEADERS_COUNT; i++) {
+        const char *name = req->headers[i].name;
+
+        if (strcasecmp(name, "Proxy-Connection") == 0) {
+            continue;
+        }
+
+        if (strcasecmp(name, "Connection") == 0) {
+            if (conn_replaced) {
+                continue;
+            }
+            snprintf(req->headers[i].value, MAX_HEADER_VAL_LEN, "close");
+            if (write_idx != i) {
+                req->headers[write_idx] = req->headers[i];
+            }
+            conn_replaced = 1;
+            write_idx++;
+            continue;
+        }
+
+        if (strcasecmp(name, "Host") == 0) {
+            if (host_replaced) {
+                continue;
+            }
+            if (orig_host && orig_host_size > 0) {
+                snprintf(orig_host, orig_host_size, "%s", req->headers[i].value);
+            }
+            snprintf(req->headers[i].value, MAX_HEADER_VAL_LEN, "%s", mapped_host);
+            if (write_idx != i) {
+                req->headers[write_idx] = req->headers[i];
+            }
+            host_replaced = 1;
+            write_idx++;
+            continue;
+        }
+
+        if (write_idx != i) {
+            req->headers[write_idx] = req->headers[i];
+        }
+        write_idx++;
+    }
+
+    if (!host_replaced && write_idx < MAX_HEADERS_COUNT) {
+        snprintf(req->headers[write_idx].name, MAX_HEADER_NAME_LEN, "Host");
+        snprintf(req->headers[write_idx].value, MAX_HEADER_VAL_LEN, "%s", mapped_host);
+        write_idx++;
+    }
+
+    if (!conn_replaced && write_idx < MAX_HEADERS_COUNT) {
+        snprintf(req->headers[write_idx].name, MAX_HEADER_NAME_LEN, "Connection");
+        snprintf(req->headers[write_idx].value, MAX_HEADER_VAL_LEN, "close");
+        write_idx++;
+    }
+
+    req->header_count = write_idx;
+
+    return resolve_backend_addr(mapping, res);
 }
 
 int handle_reverse_proxy_request(int client_fd,
-                                 const HttpRequest *in_req,
+                                 HttpRequest *req,
                                  const vsi_rp_mapping_t *mapping) {
-    if (client_fd < 0 || !in_req || !mapping) {
+    if (client_fd < 0 || !req || !mapping) {
         return -1;
     }
 
-    HttpRequest outbound_req;
     struct addrinfo *res = NULL;
     char orig_host[MAX_HEADER_VAL_LEN] = {0};
 
-    if (reverse_proxy_transform_request(in_req, mapping, &outbound_req,
-                                        orig_host, sizeof(orig_host), &res) != 0 || !res) {
+    if (reverse_proxy_transform_request_v2(req, mapping,
+                                           orig_host, sizeof(orig_host), &res) != 0 || !res) {
         const char *bad_gw = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Gateway";
         send_all_bytes(client_fd, bad_gw, strlen(bad_gw));
         return -1;
@@ -267,13 +355,13 @@ int handle_reverse_proxy_request(int client_fd,
     }
 
     // Serialize headers separately, then stream body without copying memory
-    const char *orig_body = outbound_req.body;
-    size_t orig_body_len = outbound_req.body_len;
-    outbound_req.body = NULL;
-    outbound_req.body_len = 0;
+    const char *orig_body = req->body;
+    size_t orig_body_len = req->body_len;
+    req->body = NULL;
+    req->body_len = 0;
 
     char header_buf[4096];
-    int header_len = request_demapper(&outbound_req, header_buf, sizeof(header_buf));
+    int header_len = request_demapper(req, header_buf, sizeof(header_buf));
     if (header_len < 0) {
         outbound_close(upstream_fd);
         return -1;
@@ -291,7 +379,7 @@ int handle_reverse_proxy_request(int client_fd,
         }
     }
 
-    int status = rewrite_and_relay_response(upstream_fd, client_fd, mapping, orig_host);
+    int status = rewrite_and_relay_response(upstream_fd, client_fd, mapping, orig_host); //here the upstradm_fd is the one which connect with the internal server (target host)
     outbound_close(upstream_fd);
     return status;
 }

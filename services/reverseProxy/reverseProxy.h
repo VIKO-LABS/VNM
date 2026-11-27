@@ -18,11 +18,8 @@ typedef struct {
 } vsi_rp_mapping_t;
 
 /**
- * Transforms an incoming HTTP request for the mapped backend server:
- * - Saves the original incoming Host header into orig_host.
- * - Replaces the outbound Host header with the mapped backend host[:port].
- * - Sets Connection: close so upstream closes cleanly after the response.
- * - Resolves the mapped backend address via getaddrinfo().
+ * V1: Transforms an incoming HTTP request into a separate out_req struct for the
+ * mapped backend server. Kept alongside V2 for direct A/B performance comparison.
  *
  * @return 0 on success (caller owns *res and must call freeaddrinfo), or -1 on error.
  */
@@ -34,6 +31,22 @@ int reverse_proxy_transform_request(const HttpRequest *in_req,
                                     struct addrinfo **res);
 
 /**
+ * V2: Transforms an incoming HTTP request in-place (zero extra HttpRequest
+ * allocation/copy) for the mapped backend server:
+ * - Saves the original incoming Host header into orig_host.
+ * - Replaces Host in-place with the mapped backend host[:port].
+ * - Forces Connection: close in-place (dropping Proxy-Connection).
+ * - Resolves the mapped backend address via getaddrinfo().
+ *
+ * @return 0 on success (caller owns *res and must call freeaddrinfo), or -1 on error.
+ */
+int reverse_proxy_transform_request_v2(HttpRequest *req,
+                                       const vsi_rp_mapping_t *mapping,
+                                       char *orig_host,
+                                       size_t orig_host_size,
+                                       struct addrinfo **res);
+
+/**
  * Forwards a parsed request to the mapped backend and relays the response
  * (rewriting internal host occurrences in response Host/Location headers back
  * to the original client-facing host).
@@ -41,7 +54,7 @@ int reverse_proxy_transform_request(const HttpRequest *in_req,
  * @return 0 on success, or -1 on error.
  */
 int handle_reverse_proxy_request(int client_fd,
-                                 const HttpRequest *in_req,
+                                 HttpRequest *req,
                                  const vsi_rp_mapping_t *mapping);
 
 /**

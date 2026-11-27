@@ -1,0 +1,27 @@
+{
+  "engine": {
+    "backlog": 128
+  },
+  "services": {
+    "forwardProxy": {
+      "enabled": true,
+      "listen_ip": "0.0.0.0",
+      "listen_port": 8085
+    },
+    "reverseProxy": {
+      "enabled": false,
+      "mappings": [
+        {
+          "listen_ip": "0.0.0.0",
+          "listen_port": 8081,
+          "target": "http://127.0.0.1:3001"
+        },
+        {
+          "listen_ip": "0.0.0.0",
+          "listen_port": 8082,
+          "target": "http://127.0.0.1:3002"
+        }
+      ]
+    }
+  }
+}

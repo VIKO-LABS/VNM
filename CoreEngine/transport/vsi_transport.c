@@ -59,12 +59,20 @@ int vsi_transport_start(const vsi_transport_config_t *config) {
         return -1;
     }
 
-    // 4. Bind to INADDR_ANY on configured port
+    // 4. Bind to configured IPv4 address (or INADDR_ANY for 0.0.0.0 / empty)
     struct sockaddr_in serv_addr;
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
-    serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     serv_addr.sin_port = htons(port);
+
+    const char *bind_ip = (config->listen_ip[0] != '\0') ? config->listen_ip : VSI_DEFAULT_LISTEN_IP;
+    if (strcmp(bind_ip, "0.0.0.0") == 0) {
+        serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    } else if (inet_pton(AF_INET, bind_ip, &serv_addr.sin_addr) <= 0) {
+        fprintf(stderr, "[TRANSPORT] Invalid listen_ip '%s'\n", bind_ip);
+        close(sock_fd);
+        return -1;
+    }
 
     if (bind(sock_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
         perror("[TRANSPORT] Socket bind failed");
@@ -79,7 +87,7 @@ int vsi_transport_start(const vsi_transport_config_t *config) {
         return -1;
     }
 
-    printf("[TRANSPORT] Layer 4 TCP Listener online on port %d (backlog=%d)\n", port, backlog);
+    printf("[TRANSPORT] Layer 4 TCP Listener online on %s:%d (backlog=%d)\n", bind_ip, port, backlog);
 
     // 6. Configure detached worker thread attributes
     pthread_attr_t attr;

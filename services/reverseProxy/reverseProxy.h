@@ -12,6 +12,7 @@
  * Port-to-backend mapping for the basic reverse proxy.
  */
 typedef struct {
+    char listen_ip[VSI_RP_HOST_SIZE];
     int  listen_port;
     char target_host[VSI_RP_HOST_SIZE];
     char target_port[VSI_RP_PORT_SIZE];

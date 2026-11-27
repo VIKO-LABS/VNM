@@ -20,6 +20,8 @@ add_executable(vsi_ngine
         services/reverseProxy/reverseProxy.h
         utils/toolkit.c
         utils/toolkit.h
+        utils/cJSON.c
+        utils/cJSON.h
         http1_x/http1_codec.c
         http1_x/http1_codec.h
         http1_x/parser_http_1_0.c

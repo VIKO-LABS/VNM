@@ -3,8 +3,10 @@
 
 #include <stddef.h>
 
-#define VSI_DEFAULT_PORT     8085
-#define VSI_DEFAULT_BACKLOG  128
+#define VSI_DEFAULT_LISTEN_IP "0.0.0.0"
+#define VSI_LISTEN_IP_SIZE    64
+#define VSI_DEFAULT_PORT      8085
+#define VSI_DEFAULT_BACKLOG   128
 
 /**
  * Callback invoked when a new client TCP connection is accepted.
@@ -19,6 +21,7 @@ typedef void (*vsi_connection_cb)(int client_fd, void *user_ctx);
  * Transport layer configuration.
  */
 typedef struct {
+    char listen_ip[VSI_LISTEN_IP_SIZE]; /* Bind IP address (default "0.0.0.0") */
     int port;                           /* Listening port (e.g. 8085) */
     int backlog;                        /* Kernel pending connection queue limit */
     vsi_connection_cb on_connection;    /* Service connection callback */

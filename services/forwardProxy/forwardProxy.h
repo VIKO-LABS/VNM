@@ -31,7 +31,8 @@ int handle_proxy_request(int clientfd, const HttpRequest *in_req);
  * runs forward proxy handling, and closes client_fd on completion.
  *
  * @param client_fd Accepted client socket file descriptor
+ * @param user_ctx  Unused context pointer for L4 callback compatibility
  */
-void forward_proxy_on_connection(int client_fd);
+void forward_proxy_on_connection(int client_fd, void *user_ctx);
 
 #endif // COREENGINE_FORWARD_PROXY_H

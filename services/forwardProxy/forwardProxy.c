@@ -116,7 +116,8 @@ int handle_proxy_request(int clientfd,const HttpRequest *in_req) {
     return 0;
 }
 
-void forward_proxy_on_connection(int client_fd) {
+void forward_proxy_on_connection(int client_fd, void *user_ctx) {
+    (void)user_ctx;
     if (client_fd < 0) {
         return;
     }

@@ -5,31 +5,36 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -D_GNU_SOURCE")
 
 # Common include directories
-include_directories(http1_x http0_9)
+include_directories(src http1_x CoreEngine services/forwardProxy utils)
 
-# HTTP/1.0 Server executable
-add_executable(http_1_0_server
-        http1_x/http_1_0.c
-        http1_x/http_1_0.h
+# VSI Core Engine executable
+add_executable(vsi_ngine
+        src/main.c
+        CoreEngine/transport/vsi_transport.c
+        CoreEngine/transport/vsi_transport.h
+        CoreEngine/config/vsi_config.c
+        CoreEngine/config/vsi_config.h
+        services/forwardProxy/forwardProxy.c
+        services/forwardProxy/forwardProxy.h
+        utils/toolkit.c
+        utils/toolkit.h
+        http1_x/http1_codec.c
+        http1_x/http1_codec.h
         http1_x/parser_http_1_0.c
         http1_x/parser_http_1_0.h
+        http1_x/outboundEngine.c
+        http1_x/outboundEngine.h
         http1_x/WorkerManager.c
         http1_x/WorkerManager.h)
 
-# HTTP/1.0 Parser test executable
-add_executable(test_parser
-        http1_x/test_parser.c
-        http1_x/parser_http_1_0.c
-        http1_x/parser_http_1_0.h)
-
-# HTTP/0.9 Server executable
-add_executable(http_0_9_server
-        http0_9/http_server.c)
-
-# Byte order test executable
-add_executable(hn_byteorder
-        http0_9/hn_byteorder_representation.c)
+target_include_directories(vsi_ngine PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        src
+        http1_x
+        CoreEngine
+        services/forwardProxy
+        utils)
 
 # Simple scratch test executable
-add_executable(test_scratch
-        test.c)
+#add_executable(test_scratch
+#        test.c)

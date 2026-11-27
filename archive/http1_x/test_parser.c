@@ -20,10 +20,10 @@ void test_http_1_0_request(void) {
     assert(strcmp(req.version, "HTTP/1.0") == 0);
     assert(req.header_count == 3);
 
-    const char *host = get_header_value(&req, "Host");
+    const char *host = get_header_value(req.headers, "Host",req.header_count);
     assert(host != NULL && strcmp(host, "localhost:8080") == 0);
 
-    const char *ua = get_header_value(&req, "user-agent");
+    const char *ua = get_header_value(req.headers, "user-agent",req.header_count);
     assert(ua != NULL && strcmp(ua, "CustomClient/1.0") == 0);
 
     printf("✓ test_http_1_0_request passed!\n");

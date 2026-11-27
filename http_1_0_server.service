@@ -1,0 +1,15 @@
+[Unit]
+Description=HTTP 1.0 Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/vithurshan/cloud/PD/httpServer
+ExecStart=/home/vithurshan/cloud/PD/httpServer/build/http_1_0_server
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -5,7 +5,7 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -D_GNU_SOURCE")
 
 # Common include directories
-include_directories(src http1_x CoreEngine services/forwardProxy utils)
+include_directories(src http1_x CoreEngine services/forwardProxy services/reverseProxy utils)
 
 # VSI Core Engine executable
 add_executable(vsi_ngine
@@ -16,6 +16,8 @@ add_executable(vsi_ngine
         CoreEngine/config/vsi_config.h
         services/forwardProxy/forwardProxy.c
         services/forwardProxy/forwardProxy.h
+        services/reverseProxy/reverseProxy.c
+        services/reverseProxy/reverseProxy.h
         utils/toolkit.c
         utils/toolkit.h
         http1_x/http1_codec.c
@@ -33,6 +35,7 @@ target_include_directories(vsi_ngine PRIVATE
         http1_x
         CoreEngine
         services/forwardProxy
+        services/reverseProxy
         utils)
 
 # Simple scratch test executable

@@ -14,16 +14,18 @@
 typedef struct {
     int client_fd;
     vsi_connection_cb on_connection;
+    void *user_ctx;
 } vsi_worker_arg_t;
 
 static void* vsi_transport_worker(void *arg) {
     vsi_worker_arg_t *warg = (vsi_worker_arg_t *)arg;
     int client_fd = warg->client_fd;
     vsi_connection_cb callback = warg->on_connection;
+    void *user_ctx = warg->user_ctx;
     free(warg);
 
     if (callback) {
-        callback(client_fd);
+        callback(client_fd, user_ctx);
     } else {
         close(client_fd);
     }
@@ -110,6 +112,7 @@ int vsi_transport_start(const vsi_transport_config_t *config) {
         }
         warg->client_fd = client_fd;
         warg->on_connection = config->on_connection;
+        warg->user_ctx = config->user_ctx;
 
         pthread_t worker_tid;
         if (pthread_create(&worker_tid, &attr, vsi_transport_worker, warg) != 0) {

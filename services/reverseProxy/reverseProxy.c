@@ -304,7 +304,8 @@ int reverse_proxy_transform_request_v2(HttpRequest *req,
     for (size_t i = 0; i < req->header_count && i < MAX_HEADERS_COUNT; i++) {
         const char *name = req->headers[i].name;
 
-        if (strcasecmp(name, "Proxy-Connection") == 0) {
+        if (strcasecmp(name, "Proxy-Connection") == 0 ||
+            strcasecmp(name, "Expect") == 0) {
             continue;
         }
 
@@ -363,9 +364,12 @@ int reverse_proxy_transform_request_v2(HttpRequest *req,
 static int handle_reverse_proxy_request_timed(int client_fd,
                                             HttpRequest *req,
                                             const vsi_rp_mapping_t *mapping,
+                                            const http1_body_framing_t *framing,
+                                            size_t *out_streamed_in,
                                             size_t *out_bytes_sent,
                                             uint64_t *out_after_send_ns,
                                             uint64_t *out_first_byte_ns) {
+    if (out_streamed_in) *out_streamed_in = 0;
     if (out_bytes_sent) *out_bytes_sent = 0;
     if (out_after_send_ns) *out_after_send_ns = 0;
     if (out_first_byte_ns) *out_first_byte_ns = 0;
@@ -373,6 +377,9 @@ static int handle_reverse_proxy_request_timed(int client_fd,
     if (client_fd < 0 || !req || !mapping) {
         return -1;
     }
+
+    const char *expect = get_header_value(req->headers, "Expect", req->header_count);
+    int expect_continue = (expect && strcasestr(expect, "100-continue") != NULL);
 
     struct addrinfo *res = NULL;
     char orig_host[MAX_HEADER_VAL_LEN] = {0};
@@ -400,7 +407,7 @@ static int handle_reverse_proxy_request_timed(int client_fd,
     req->body = NULL;
     req->body_len = 0;
 
-    char header_buf[4096];
+    char header_buf[HTTP1_HEADER_BUFFER_SIZE + 512];
     int header_len = request_demapper(req, header_buf, sizeof(header_buf));
     if (header_len < 0) {
         outbound_close(upstream_fd);
@@ -412,17 +419,32 @@ static int handle_reverse_proxy_request_timed(int client_fd,
         return -1;
     }
 
-    if (orig_body && orig_body_len > 0) {
-        if (send_all_bytes(upstream_fd, orig_body, orig_body_len) < 0) {
+    size_t interim_sent = 0;
+    if (expect_continue && framing && framing->mode != HTTP1_BODY_NONE) {
+        const char *cont_msg = "HTTP/1.1 100 Continue\r\n\r\n";
+        ssize_t cw = send_all_bytes(client_fd, cont_msg, strlen(cont_msg));
+        if (cw < 0) {
             outbound_close(upstream_fd);
             return -1;
         }
+        interim_sent = (size_t)cw;
     }
+
+    size_t streamed_in = 0;
+    if (http1_stream_request_body(client_fd, upstream_fd, orig_body, orig_body_len,
+                                  framing, &streamed_in) != 0) {
+        if (out_streamed_in) *out_streamed_in = streamed_in;
+        if (out_bytes_sent) *out_bytes_sent = interim_sent;
+        outbound_close(upstream_fd);
+        return -1;
+    }
+    if (out_streamed_in) *out_streamed_in = streamed_in;
 
     if (out_after_send_ns) *out_after_send_ns = vsi_now_ns();
 
     int status = rewrite_and_relay_response(upstream_fd, client_fd, mapping, orig_host,
                                             out_bytes_sent, out_first_byte_ns); //here the upstradm_fd is the one which connect with the internal server (target host)
+    if (out_bytes_sent) *out_bytes_sent += interim_sent;
     outbound_close(upstream_fd);
     return status;
 }
@@ -430,7 +452,13 @@ static int handle_reverse_proxy_request_timed(int client_fd,
 int handle_reverse_proxy_request(int client_fd,
                                  HttpRequest *req,
                                  const vsi_rp_mapping_t *mapping) {
-    return handle_reverse_proxy_request_timed(client_fd, req, mapping, NULL, NULL, NULL);
+    http1_body_framing_t framing = { HTTP1_BODY_NONE, 0 };
+    if (req && req->body && req->body_len > 0) {
+        framing.mode = HTTP1_BODY_CONTENT_LENGTH;
+        framing.content_length = req->body_len;
+    }
+    return handle_reverse_proxy_request_timed(client_fd, req, mapping,
+                                              &framing, NULL, NULL, NULL, NULL);
 }
 
 void reverse_proxy_on_connection(int client_fd, void *user_ctx) {
@@ -447,19 +475,34 @@ void reverse_proxy_on_connection(int client_fd, void *user_ctx) {
     vsi_metrics_conn_open();
     uint64_t t0 = vsi_now_ns();
     size_t bytes_in = 0;
+    size_t streamed_in = 0;
     size_t bytes_out = 0;
     uint64_t t_after_send = 0;
     uint64_t t_first_byte = 0;
     int failed = 0;
 
-    char buffer[HTTP1_READ_BUFFER_SIZE];
+    char buffer[HTTP1_HEADER_BUFFER_SIZE];
     HttpRequest req;
+    http1_body_framing_t framing;
 
-    if (http1_read_and_parse_request_ex(client_fd, buffer, sizeof(buffer), &req, &bytes_in) == 0) {
+    int rc = http1_read_and_parse_headers(client_fd, buffer, sizeof(buffer), &req, &framing, &bytes_in);
+    if (rc == HTTP1_OK) {
         if (handle_reverse_proxy_request_timed(client_fd, &req, mapping,
+                                               &framing, &streamed_in,
                                                &bytes_out, &t_after_send, &t_first_byte) != 0) {
             failed = 1;
         }
+        bytes_in += streamed_in;
+    } else if (rc == HTTP1_ERR_HEADERS_TOO_LARGE) {
+        const char *resp = "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 31\r\nConnection: close\r\n\r\nRequest Header Fields Too Large";
+        ssize_t w = send_all_bytes(client_fd, resp, strlen(resp));
+        if (w > 0) bytes_out = (size_t)w;
+        failed = 1;
+    } else if (rc == HTTP1_ERR_BAD_REQUEST) {
+        const char *resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request";
+        ssize_t w = send_all_bytes(client_fd, resp, strlen(resp));
+        if (w > 0) bytes_out = (size_t)w;
+        failed = 1;
     } else {
         failed = 1;
     }

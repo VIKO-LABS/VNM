@@ -1,4 +1,5 @@
 #include "forwardProxy.h"
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -13,6 +14,19 @@
 #define TUNNEL_BUFFER_SIZE 65536
 #define HOST_SIZE 64
 #define PORT_SIZE 8
+
+static ssize_t fp_write_all(int fd, const char *data, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t w = write(fd, data + sent, len - sent);
+        if (w <= 0) {
+            if (w < 0 && errno == EINTR) continue;
+            return -1;
+        }
+        sent += (size_t)w;
+    }
+    return (ssize_t)sent;
+}
 
 static void handle_request_through_tunnel_tracked(int clientfd,
                                                   int outstream_fd,
@@ -80,6 +94,75 @@ void handle_request_through_tunnel(int clientfd, int outstream_fd) {
     handle_request_through_tunnel_tracked(clientfd, outstream_fd, NULL, NULL);
 }
 
+static int handle_request_through_http_streamed(int clientfd,
+                                                int outstreamfd,
+                                                HttpRequest *outbound_req,
+                                                const http1_body_framing_t *framing,
+                                                int expect_continue,
+                                                size_t *out_streamed_in) {
+    if (out_streamed_in) *out_streamed_in = 0;
+    if (clientfd < 0 || outstreamfd < 0 || !outbound_req) {
+        if (outstreamfd >= 0) outbound_close(outstreamfd);
+        return -1;
+    }
+
+    char header_buf[HTTP1_HEADER_BUFFER_SIZE + 512];
+    const char *orig_body = outbound_req->body;
+    size_t orig_body_len = outbound_req->body_len;
+    outbound_req->body = NULL;
+    outbound_req->body_len = 0;
+
+    int header_len = request_demapper(outbound_req, header_buf, sizeof(header_buf));
+    if (header_len <= 0) {
+        outbound_close(outstreamfd);
+        return -1;
+    }
+
+    if (fp_write_all(outstreamfd, header_buf, (size_t)header_len) < 0) {
+        outbound_close(outstreamfd);
+        return -1;
+    }
+
+    size_t interim_sent = 0;
+    if (expect_continue && framing && framing->mode != HTTP1_BODY_NONE) {
+        const char *cont_msg = "HTTP/1.1 100 Continue\r\n\r\n";
+        ssize_t cw = fp_write_all(clientfd, cont_msg, strlen(cont_msg));
+        if (cw < 0) {
+            outbound_close(outstreamfd);
+            return -1;
+        }
+        interim_sent = (size_t)cw;
+    }
+
+    if (http1_stream_request_body(clientfd, outstreamfd, orig_body, orig_body_len,
+                                  framing, out_streamed_in) != 0) {
+        outbound_close(outstreamfd);
+        return -1;
+    }
+
+    char resp_buf[HTTP1_STREAM_BUFFER_SIZE];
+    size_t total_relayed = interim_sent;
+    while (1) {
+        ssize_t r = read(outstreamfd, resp_buf, sizeof(resp_buf));
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            outbound_close(outstreamfd);
+            return -1;
+        }
+        if (r == 0) {
+            break;
+        }
+        if (fp_write_all(clientfd, resp_buf, (size_t)r) < 0) {
+            outbound_close(outstreamfd);
+            return -1;
+        }
+        total_relayed += (size_t)r;
+    }
+
+    outbound_close(outstreamfd);
+    return (int)total_relayed;
+}
+
 int handle_request_through_http(int clientfd, int outstreamfd, HttpRequest *outbound_req) {
     char header_buf[4096];
     // Clear body from outbound_req temporarily so demapper only serializes headers
@@ -102,10 +185,13 @@ int handle_request_through_http(int clientfd, int outstreamfd, HttpRequest *outb
 
 static int handle_proxy_request_timed(int clientfd,
                                       const HttpRequest *in_req,
+                                      const http1_body_framing_t *framing,
                                       uint64_t t0,
+                                      size_t *out_streamed_in,
                                       size_t *out_tunnel_in,
                                       size_t *out_bytes_out,
                                       uint64_t *out_latency_ns) {
+    if (out_streamed_in) *out_streamed_in = 0;
     if (out_tunnel_in) *out_tunnel_in = 0;
     if (out_bytes_out) *out_bytes_out = 0;
     if (out_latency_ns) *out_latency_ns = 0;
@@ -113,6 +199,9 @@ static int handle_proxy_request_timed(int clientfd,
     if (!in_req || clientfd < 0) {
         return -1;
     }
+
+    const char *expect = get_header_value(in_req->headers, "Expect", in_req->header_count);
+    int expect_continue = (expect && strcasestr(expect, "100-continue") != NULL);
 
     HttpRequest outbound_req;
     struct addrinfo *res = NULL;
@@ -130,7 +219,7 @@ static int handle_proxy_request_timed(int clientfd,
     if (strcmp(outbound_req.method, "CONNECT") == 0) {
         const char *ok_msg = "HTTP/1.1 200 Connection Established\r\n\r\n";
         size_t ok_len = strlen(ok_msg);
-        ssize_t w = write(clientfd, ok_msg, ok_len);
+        ssize_t w = fp_write_all(clientfd, ok_msg, ok_len);
         size_t established_bytes = (w > 0) ? (size_t)w : 0;
 
         // Capture tunnel setup latency right as 200 Connection Established is sent
@@ -152,7 +241,8 @@ static int handle_proxy_request_timed(int clientfd,
         return (w > 0) ? 0 : -1;
     }
 
-    int relayed = handle_request_through_http(clientfd, outstream_fd, &outbound_req);
+    int relayed = handle_request_through_http_streamed(clientfd, outstream_fd, &outbound_req,
+                                                       framing, expect_continue, out_streamed_in);
     if (out_latency_ns && t0 > 0) {
         uint64_t t_end = vsi_now_ns();
         *out_latency_ns = (t_end > t0) ? (t_end - t0) : 0;
@@ -165,7 +255,12 @@ static int handle_proxy_request_timed(int clientfd,
 }
 
 int handle_proxy_request(int clientfd, const HttpRequest *in_req) {
-    return handle_proxy_request_timed(clientfd, in_req, 0, NULL, NULL, NULL);
+    http1_body_framing_t framing = { HTTP1_BODY_NONE, 0 };
+    if (in_req && in_req->body && in_req->body_len > 0) {
+        framing.mode = HTTP1_BODY_CONTENT_LENGTH;
+        framing.content_length = in_req->body_len;
+    }
+    return handle_proxy_request_timed(clientfd, in_req, &framing, 0, NULL, NULL, NULL, NULL);
 }
 
 void forward_proxy_on_connection(int client_fd, void *user_ctx) {
@@ -177,24 +272,40 @@ void forward_proxy_on_connection(int client_fd, void *user_ctx) {
     vsi_metrics_conn_open();
     uint64_t t0 = vsi_now_ns();
     size_t req_bytes_in = 0;
+    size_t streamed_in = 0;
     size_t tunnel_in = 0;
     size_t bytes_out = 0;
     uint64_t elapsed_ns = 0;
     int failed = 0;
 
-    char buffer[HTTP1_READ_BUFFER_SIZE];
+    char buffer[HTTP1_HEADER_BUFFER_SIZE];
     HttpRequest req;
+    http1_body_framing_t framing;
 
-    if (http1_read_and_parse_request_ex(client_fd, buffer, sizeof(buffer), &req, &req_bytes_in) == 0) {
-        if (handle_proxy_request_timed(client_fd, &req, t0, &tunnel_in, &bytes_out, &elapsed_ns) != 0) {
+    int rc = http1_read_and_parse_headers(client_fd, buffer, sizeof(buffer), &req, &framing, &req_bytes_in);
+    if (rc == HTTP1_OK) {
+        if (handle_proxy_request_timed(client_fd, &req, &framing, t0,
+                                       &streamed_in, &tunnel_in, &bytes_out, &elapsed_ns) != 0) {
             failed = 1;
         }
+    } else if (rc == HTTP1_ERR_HEADERS_TOO_LARGE) {
+        const char *resp = "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 31\r\nConnection: close\r\n\r\nRequest Header Fields Too Large";
+        ssize_t w = fp_write_all(client_fd, resp, strlen(resp));
+        if (w > 0) bytes_out = (size_t)w;
+        elapsed_ns = vsi_now_ns() - t0;
+        failed = 1;
+    } else if (rc == HTTP1_ERR_BAD_REQUEST) {
+        const char *resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request";
+        ssize_t w = fp_write_all(client_fd, resp, strlen(resp));
+        if (w > 0) bytes_out = (size_t)w;
+        elapsed_ns = vsi_now_ns() - t0;
+        failed = 1;
     } else {
         elapsed_ns = vsi_now_ns() - t0;
         failed = 1;
     }
 
-    vsi_metrics_record_request(req_bytes_in + tunnel_in, bytes_out, elapsed_ns, 0, elapsed_ns, failed);
+    vsi_metrics_record_request(req_bytes_in + streamed_in + tunnel_in, bytes_out, elapsed_ns, 0, elapsed_ns, failed);
     vsi_metrics_conn_close();
 
     close(client_fd);
@@ -300,7 +411,8 @@ int forward_proxy_transform_request(const HttpRequest *in_req,
     size_t out_hcount = 0;
     for (size_t i = 0; i < in_req->header_count && out_hcount < MAX_HEADERS_COUNT; i++) {
         // Skip hop-by-hop proxy headers
-        if (strcasecmp(in_req->headers[i].name, "Proxy-Connection") == 0) {
+        if (strcasecmp(in_req->headers[i].name, "Proxy-Connection") == 0 ||
+            strcasecmp(in_req->headers[i].name, "Expect") == 0) {
             continue;
         }
 

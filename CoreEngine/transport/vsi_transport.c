@@ -95,14 +95,10 @@ int vsi_transport_start(const vsi_transport_config_t *config) {
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 
     // 7. Core Connection Acceptance Loop
-    int client_init_count =0;
     while (1) {
-
         struct sockaddr_in client_addr;
         socklen_t addr_len = sizeof(client_addr);
         int client_fd = accept(sock_fd, (struct sockaddr *)&client_addr, &addr_len);
-        printf("client connected count is %d\n",++client_init_count);
-
 
         if (client_fd < 0) {
             if (errno == EINTR) {

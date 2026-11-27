@@ -5,8 +5,6 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "../utils/toolkit.h"
-
 int http1_read_and_parse_request(int client_fd, char *buffer, size_t buffer_size, HttpRequest *req) {
     if (client_fd < 0 || !buffer || buffer_size == 0 || !req) {
         return -1;
@@ -63,7 +61,6 @@ int http1_read_and_parse_request(int client_fd, char *buffer, size_t buffer_size
     }
 
     // Phase 3: Parse HTTP/1.x bytes into HttpRequest
-    //print_buffer(buffer, filled);
     parse_http_1_0(buffer, filled, req);
 
     if (req->state == PARSER_STATE_REJECTED) {

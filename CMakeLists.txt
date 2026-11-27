@@ -22,6 +22,8 @@ add_executable(vsi_ngine
         utils/toolkit.h
         utils/cJSON.c
         utils/cJSON.h
+        utils/vsi_metrics.c
+        utils/vsi_metrics.h
         http1_x/http1_codec.c
         http1_x/http1_codec.h
         http1_x/parser_http_1_0.c

@@ -7,13 +7,14 @@
 #include <unistd.h>
 
 #include "../../utils/toolkit.h"
+#include "../../utils/vsi_metrics.h"
 #include "../../http1_x/outboundEngine.h"
 #include "../../http1_x/http1_codec.h"
 
 #define RP_RESP_HDR_BUF_SIZE 16384
 #define RP_STREAM_BUF_SIZE   65536
 
-static int send_all_bytes(int fd, const char *data, size_t len) {
+static ssize_t send_all_bytes(int fd, const char *data, size_t len) {
     size_t sent = 0;
     while (sent < len) {
         ssize_t w = write(fd, data + sent, len - sent);
@@ -23,7 +24,7 @@ static int send_all_bytes(int fd, const char *data, size_t len) {
         }
         sent += (size_t)w;
     }
-    return 0;
+    return (ssize_t)sent;
 }
 
 static void format_host_port(const vsi_rp_mapping_t *mapping, char *out, size_t out_size) {
@@ -36,13 +37,13 @@ static void format_host_port(const vsi_rp_mapping_t *mapping, char *out, size_t 
 
 /**
  * Copies `line` into `client_fd`, replacing all occurrences of `needle`
- * with `replacement` (case-insensitive).
+ * with `replacement` (case-insensitive). Returns bytes written, or -1 on error.
  */
-static int write_line_replacing_host(int client_fd,
-                                     const char *line,
-                                     size_t line_len,
-                                     const char *needle,
-                                     const char *replacement) {
+static ssize_t write_line_replacing_host(int client_fd,
+                                         const char *line,
+                                         size_t line_len,
+                                         const char *needle,
+                                         const char *replacement) {
     if (!needle || needle[0] == '\0' || !replacement || replacement[0] == '\0') {
         return send_all_bytes(client_fd, line, line_len);
     }
@@ -50,17 +51,22 @@ static int write_line_replacing_host(int client_fd,
     size_t needle_len = strlen(needle);
     size_t repl_len = strlen(replacement);
     size_t pos = 0;
+    size_t total_written = 0;
 
     while (pos < line_len) {
         if (pos + needle_len <= line_len && strncasecmp(line + pos, needle, needle_len) == 0) {
-            if (send_all_bytes(client_fd, replacement, repl_len) < 0) return -1;
+            ssize_t w = send_all_bytes(client_fd, replacement, repl_len);
+            if (w < 0) return -1;
+            total_written += (size_t)w;
             pos += needle_len;
         } else {
-            if (send_all_bytes(client_fd, line + pos, 1) < 0) return -1;
+            ssize_t w = send_all_bytes(client_fd, line + pos, 1);
+            if (w < 0) return -1;
+            total_written += (size_t)w;
             pos++;
         }
     }
-    return 0;
+    return (ssize_t)total_written;
 }
 
 /**
@@ -71,10 +77,17 @@ static int write_line_replacing_host(int client_fd,
 static int rewrite_and_relay_response(int upstream_fd,
                                       int client_fd,
                                       const vsi_rp_mapping_t *mapping,
-                                      const char *orig_host) {
+                                      const char *orig_host,
+                                      size_t *out_bytes_sent,
+                                      uint64_t *out_first_byte_ns) {
+    if (out_bytes_sent) *out_bytes_sent = 0;
+    if (out_first_byte_ns) *out_first_byte_ns = 0;
+
     char hdr_buf[RP_RESP_HDR_BUF_SIZE];
     size_t filled = 0;
     char *hdr_end = NULL;
+    size_t total_sent = 0;
+    uint64_t first_byte_ns = 0;
 
     while (filled < sizeof(hdr_buf) - 1) {
         ssize_t r = read(upstream_fd, hdr_buf + filled, sizeof(hdr_buf) - 1 - filled);
@@ -85,6 +98,10 @@ static int rewrite_and_relay_response(int upstream_fd,
         }
         if (r == 0) break;
 
+        if (first_byte_ns == 0 && out_first_byte_ns) {
+            first_byte_ns = vsi_now_ns();
+        }
+
         filled += (size_t)r;
         hdr_buf[filled] = '\0';
 
@@ -92,13 +109,17 @@ static int rewrite_and_relay_response(int upstream_fd,
         if (hdr_end != NULL) break;
     }
 
+    if (out_first_byte_ns) *out_first_byte_ns = first_byte_ns;
+
     if (filled == 0) {
         return -1;
     }
 
     // Fallback: if upstream sent raw data without standard \r\n\r\n within 16 KB, forward verbatim
     if (hdr_end == NULL) {
-        if (send_all_bytes(client_fd, hdr_buf, filled) < 0) return -1;
+        ssize_t w = send_all_bytes(client_fd, hdr_buf, filled);
+        if (w < 0) return -1;
+        total_sent += (size_t)w;
     } else {
         char mapped_host_port[VSI_RP_HOST_SIZE + VSI_RP_PORT_SIZE + 2];
         format_host_port(mapping, mapped_host_port, sizeof(mapped_host_port));
@@ -117,27 +138,32 @@ static int rewrite_and_relay_response(int upstream_fd,
                                  ((line_len >= 5 && strncasecmp(cursor, "Host:", 5) == 0) ||
                                   (line_len >= 9 && strncasecmp(cursor, "Location:", 9) == 0));
 
-            if (should_rewrite) {
-                if (write_line_replacing_host(client_fd, cursor, line_len, mapped_host_port, orig_host) < 0) {
-                    return -1;
-                }
-            } else {
-                if (send_all_bytes(client_fd, cursor, line_len) < 0) return -1;
-            }
+            ssize_t lw = should_rewrite
+                         ? write_line_replacing_host(client_fd, cursor, line_len, mapped_host_port, orig_host)
+                         : send_all_bytes(client_fd, cursor, line_len);
+            if (lw < 0) return -1;
+            total_sent += (size_t)lw;
 
-            if (send_all_bytes(client_fd, "\r\n", 2) < 0) return -1;
+            ssize_t cw = send_all_bytes(client_fd, "\r\n", 2);
+            if (cw < 0) return -1;
+            total_sent += (size_t)cw;
+
             is_first_line = 0;
             cursor = (crlf && crlf <= block_end) ? (crlf + 2) : block_end;
         }
 
         // Terminate response header section
-        if (send_all_bytes(client_fd, "\r\n", 2) < 0) return -1;
+        ssize_t tw = send_all_bytes(client_fd, "\r\n", 2);
+        if (tw < 0) return -1;
+        total_sent += (size_t)tw;
 
         // Flush any body bytes already captured inside hdr_buf after \r\n\r\n
         const char *body_start = hdr_end + 4;
         size_t already_body_len = filled - (size_t)(body_start - hdr_buf);
         if (already_body_len > 0) {
-            if (send_all_bytes(client_fd, body_start, already_body_len) < 0) return -1;
+            ssize_t bw = send_all_bytes(client_fd, body_start, already_body_len);
+            if (bw < 0) return -1;
+            total_sent += (size_t)bw;
         }
     }
 
@@ -148,15 +174,20 @@ static int rewrite_and_relay_response(int upstream_fd,
         if (r < 0) {
             if (errno == EINTR) continue;
             perror("[REVERSE_PROXY] Upstream body read error");
+            if (out_bytes_sent) *out_bytes_sent = total_sent;
             return -1;
         }
         if (r == 0) break;
 
-        if (send_all_bytes(client_fd, stream_buf, (size_t)r) < 0) {
+        ssize_t sw = send_all_bytes(client_fd, stream_buf, (size_t)r);
+        if (sw < 0) {
+            if (out_bytes_sent) *out_bytes_sent = total_sent;
             return -1;
         }
+        total_sent += (size_t)sw;
     }
 
+    if (out_bytes_sent) *out_bytes_sent = total_sent;
     return 0;
 }
 
@@ -329,9 +360,16 @@ int reverse_proxy_transform_request_v2(HttpRequest *req,
     return resolve_backend_addr(mapping, res);
 }
 
-int handle_reverse_proxy_request(int client_fd,
-                                 HttpRequest *req,
-                                 const vsi_rp_mapping_t *mapping) {
+static int handle_reverse_proxy_request_timed(int client_fd,
+                                            HttpRequest *req,
+                                            const vsi_rp_mapping_t *mapping,
+                                            size_t *out_bytes_sent,
+                                            uint64_t *out_after_send_ns,
+                                            uint64_t *out_first_byte_ns) {
+    if (out_bytes_sent) *out_bytes_sent = 0;
+    if (out_after_send_ns) *out_after_send_ns = 0;
+    if (out_first_byte_ns) *out_first_byte_ns = 0;
+
     if (client_fd < 0 || !req || !mapping) {
         return -1;
     }
@@ -342,7 +380,8 @@ int handle_reverse_proxy_request(int client_fd,
     if (reverse_proxy_transform_request_v2(req, mapping,
                                            orig_host, sizeof(orig_host), &res) != 0 || !res) {
         const char *bad_gw = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Gateway";
-        send_all_bytes(client_fd, bad_gw, strlen(bad_gw));
+        ssize_t w = send_all_bytes(client_fd, bad_gw, strlen(bad_gw));
+        if (out_bytes_sent && w > 0) *out_bytes_sent = (size_t)w;
         return -1;
     }
 
@@ -350,7 +389,8 @@ int handle_reverse_proxy_request(int client_fd,
     freeaddrinfo(res);
     if (upstream_fd < 0) {
         const char *bad_gw = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Gateway";
-        send_all_bytes(client_fd, bad_gw, strlen(bad_gw));
+        ssize_t w = send_all_bytes(client_fd, bad_gw, strlen(bad_gw));
+        if (out_bytes_sent && w > 0) *out_bytes_sent = (size_t)w;
         return -1;
     }
 
@@ -379,9 +419,18 @@ int handle_reverse_proxy_request(int client_fd,
         }
     }
 
-    int status = rewrite_and_relay_response(upstream_fd, client_fd, mapping, orig_host); //here the upstradm_fd is the one which connect with the internal server (target host)
+    if (out_after_send_ns) *out_after_send_ns = vsi_now_ns();
+
+    int status = rewrite_and_relay_response(upstream_fd, client_fd, mapping, orig_host,
+                                            out_bytes_sent, out_first_byte_ns); //here the upstradm_fd is the one which connect with the internal server (target host)
     outbound_close(upstream_fd);
     return status;
+}
+
+int handle_reverse_proxy_request(int client_fd,
+                                 HttpRequest *req,
+                                 const vsi_rp_mapping_t *mapping) {
+    return handle_reverse_proxy_request_timed(client_fd, req, mapping, NULL, NULL, NULL);
 }
 
 void reverse_proxy_on_connection(int client_fd, void *user_ctx) {
@@ -395,12 +444,34 @@ void reverse_proxy_on_connection(int client_fd, void *user_ctx) {
         return;
     }
 
+    vsi_metrics_conn_open();
+    uint64_t t0 = vsi_now_ns();
+    size_t bytes_in = 0;
+    size_t bytes_out = 0;
+    uint64_t t_after_send = 0;
+    uint64_t t_first_byte = 0;
+    int failed = 0;
+
     char buffer[HTTP1_READ_BUFFER_SIZE];
     HttpRequest req;
 
-    if (http1_read_and_parse_request(client_fd, buffer, sizeof(buffer), &req) == 0) {
-        handle_reverse_proxy_request(client_fd, &req, mapping);
+    if (http1_read_and_parse_request_ex(client_fd, buffer, sizeof(buffer), &req, &bytes_in) == 0) {
+        if (handle_reverse_proxy_request_timed(client_fd, &req, mapping,
+                                               &bytes_out, &t_after_send, &t_first_byte) != 0) {
+            failed = 1;
+        }
+    } else {
+        failed = 1;
     }
+
+    uint64_t t_end = vsi_now_ns();
+    uint64_t total_ns = (t_end > t0) ? (t_end - t0) : 0;
+    uint64_t upstream_wait_ns = (t_first_byte > t_after_send && t_after_send > 0)
+                                ? (t_first_byte - t_after_send) : 0;
+    uint64_t proxy_overhead_ns = (total_ns > upstream_wait_ns) ? (total_ns - upstream_wait_ns) : total_ns;
+
+    vsi_metrics_record_request(bytes_in, bytes_out, proxy_overhead_ns, upstream_wait_ns, total_ns, failed);
+    vsi_metrics_conn_close();
 
     close(client_fd);
 }

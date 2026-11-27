@@ -9,6 +9,7 @@
 
 #include "../CoreEngine/transport/vsi_transport.h"
 #include "../CoreEngine/config/vsi_config.h"
+#include "../utils/vsi_metrics.h"
 
 #define VSI_MAX_SERVICES 8
 
@@ -84,6 +85,10 @@ static void print_startup_banner(const vsi_config_t *cfg) {
                    i + 1, m->listen_ip, m->listen_port, m->target_host, m->target_port);
         }
     }
+    if (cfg->metrics.enabled) {
+        printf("        [METRICS] http://%s:%d/metrics\n",
+               cfg->metrics.listen_ip, cfg->metrics.listen_port);
+    }
     printf("====================================================\n");
     fflush(stdout);
 }
@@ -133,6 +138,10 @@ static int run_multi_service_supervisor(const vsi_config_t *cfg) {
     }
 
     fflush(stdout);
+
+    if (cfg->metrics.enabled) {
+        vsi_metrics_start_server(cfg->metrics.listen_ip, cfg->metrics.listen_port);
+    }
 
     // Install async-signal-safe handlers without SA_RESTART so waitpid() wakes on signal
     struct sigaction sa;
@@ -192,14 +201,24 @@ int main(int argc, char **argv) {
 
     print_startup_banner(&cfg);
 
-    // Single active service runs directly in the main process (no fork overhead)
-    if (cfg.active_service_count == 1) {
-        if (cfg.forward_proxy.enabled) {
-            return run_forward_proxy_service(&cfg);
-        }
-        return run_reverse_proxy_service(&cfg);
+    if (cfg.metrics.enabled && vsi_metrics_init() != 0) {
+        return 1;
     }
 
-    // Multiple active services spawn isolated processes supervised by main
+    // Single active service runs directly in the main process (no fork overhead)
+    if (cfg.active_service_count == 1) {
+        if (cfg.metrics.enabled) {
+            vsi_metrics_start_server(cfg.metrics.listen_ip, cfg.metrics.listen_port);
+        }
+        int rc = cfg.forward_proxy.enabled
+                 ? run_forward_proxy_service(&cfg)
+                 : run_reverse_proxy_service(&cfg);
+        vsi_metrics_destroy();
+        return rc;
+    }
+
+    // Multiple active services spawn isolated processes supervised by main.
+    // Note: if metrics enabled, fork children first while single-threaded, then start
+    // the metrics HTTP endpoint inside the supervisor or let supervisor fork cleanly.
     return run_multi_service_supervisor(&cfg);
 }

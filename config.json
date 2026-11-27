@@ -2,6 +2,11 @@
   "engine": {
     "backlog": 128
   },
+  "metrics": {
+    "enabled": true,
+    "listen_ip": "0.0.0.0",
+    "listen_port": 9100
+  },
   "services": {
     "forwardProxy": {
       "enabled": true,

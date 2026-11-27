@@ -9,6 +9,7 @@
 #include "../../services/forwardProxy/forwardProxy.h"
 #include "../../services/reverseProxy/reverseProxy.h"
 #include "../../utils/cJSON.h"
+#include "../../utils/vsi_metrics.h"
 
 static int is_mapping_flag(const char *arg) {
     if (!arg || arg[0] != '-' || (arg[1] != 'M' && arg[1] != 'm')) {
@@ -115,6 +116,10 @@ void vsi_config_load_default(vsi_config_t *cfg, int port) {
     snprintf(cfg->forward_proxy.listen_ip, sizeof(cfg->forward_proxy.listen_ip), "%s", VSI_DEFAULT_LISTEN_IP);
     cfg->forward_proxy.listen_port = (port > 0 && port <= 65535) ? port : VSI_DEFAULT_PORT;
 
+    cfg->metrics.enabled = 1;
+    snprintf(cfg->metrics.listen_ip, sizeof(cfg->metrics.listen_ip), "%s", VSI_DEFAULT_METRICS_IP);
+    cfg->metrics.listen_port = VSI_DEFAULT_METRICS_PORT;
+
     cfg->active_service_count = 1;
 }
 
@@ -127,7 +132,7 @@ int vsi_config_validate_ports(const vsi_config_t *cfg) {
         const char *label;
     } vsi_endpoint_t;
 
-    vsi_endpoint_t eps[1 + VSI_MAX_RP_MAPPINGS];
+    vsi_endpoint_t eps[2 + VSI_MAX_RP_MAPPINGS];
     int ep_count = 0;
 
     if (cfg->forward_proxy.enabled) {
@@ -144,6 +149,13 @@ int vsi_config_validate_ports(const vsi_config_t *cfg) {
             eps[ep_count].label = "reverseProxy";
             ep_count++;
         }
+    }
+
+    if (cfg->metrics.enabled) {
+        eps[ep_count].ip = cfg->metrics.listen_ip;
+        eps[ep_count].port = cfg->metrics.listen_port;
+        eps[ep_count].label = "metrics";
+        ep_count++;
     }
 
     for (int i = 0; i < ep_count; i++) {
@@ -291,6 +303,40 @@ int vsi_config_load_json(vsi_config_t *cfg, const char *json_path) {
         }
     }
 
+    // Parse optional metrics endpoint configuration (defaults to enabled on 127.0.0.1:9100)
+    cfg->metrics.enabled = 1;
+    snprintf(cfg->metrics.listen_ip, sizeof(cfg->metrics.listen_ip), "%s", VSI_DEFAULT_METRICS_IP);
+    cfg->metrics.listen_port = VSI_DEFAULT_METRICS_PORT;
+
+    const cJSON *metrics = cJSON_GetObjectItemCaseSensitive(root, "metrics");
+    if (cJSON_IsObject(metrics)) {
+        const cJSON *enabled = cJSON_GetObjectItemCaseSensitive(metrics, "enabled");
+        if (cJSON_IsBool(enabled)) {
+            cfg->metrics.enabled = cJSON_IsTrue(enabled) ? 1 : 0;
+        }
+        if (cfg->metrics.enabled) {
+            const cJSON *ip = cJSON_GetObjectItemCaseSensitive(metrics, "listen_ip");
+            const char *ip_str = (cJSON_IsString(ip) && ip->valuestring && ip->valuestring[0] != '\0')
+                                 ? ip->valuestring : VSI_DEFAULT_METRICS_IP;
+            if (!validate_ipv4_or_wildcard(ip_str)) {
+                fprintf(stderr, "[CONFIG] Invalid metrics listen_ip '%s'\n", ip_str);
+                cJSON_Delete(root);
+                return -1;
+            }
+            snprintf(cfg->metrics.listen_ip, sizeof(cfg->metrics.listen_ip), "%s", ip_str);
+
+            const cJSON *port = cJSON_GetObjectItemCaseSensitive(metrics, "listen_port");
+            if (cJSON_IsNumber(port)) {
+                if (port->valueint <= 0 || port->valueint > 65535) {
+                    fprintf(stderr, "[CONFIG] Invalid metrics listen_port %d\n", port->valueint);
+                    cJSON_Delete(root);
+                    return -1;
+                }
+                cfg->metrics.listen_port = port->valueint;
+            }
+        }
+    }
+
     cJSON_Delete(root);
 
     if (cfg->active_service_count == 0) {
@@ -321,6 +367,9 @@ int vsi_config_parse_args(vsi_config_t *cfg, int argc, char **argv) {
     // 3. Backwards-compatible CLI overrides (-M<n> for reverse proxy, or <port> for forward proxy)
     memset(cfg, 0, sizeof(vsi_config_t));
     cfg->backlog = VSI_DEFAULT_BACKLOG;
+    cfg->metrics.enabled = 1;
+    snprintf(cfg->metrics.listen_ip, sizeof(cfg->metrics.listen_ip), "%s", VSI_DEFAULT_METRICS_IP);
+    cfg->metrics.listen_port = VSI_DEFAULT_METRICS_PORT;
 
     int has_mapping_flags = 0;
     for (int i = 1; i < argc; i++) {

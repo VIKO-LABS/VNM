@@ -27,14 +27,21 @@ typedef struct {
     int              mapping_count;
 } vsi_rp_config_t;
 
+typedef struct {
+    int  enabled;
+    char listen_ip[VSI_LISTEN_IP_SIZE];
+    int  listen_port;
+} vsi_metrics_config_t;
+
 /**
  * Engine startup configuration loaded from config.json or CLI arguments.
  */
 typedef struct {
-    int             backlog;
-    vsi_fp_config_t forward_proxy;
-    vsi_rp_config_t reverse_proxy;
-    int             active_service_count;
+    int                  backlog;
+    vsi_fp_config_t      forward_proxy;
+    vsi_rp_config_t      reverse_proxy;
+    vsi_metrics_config_t metrics;
+    int                  active_service_count;
 } vsi_config_t;
 
 /**

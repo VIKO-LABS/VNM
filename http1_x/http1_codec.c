@@ -5,7 +5,12 @@
 #include <string.h>
 #include <unistd.h>
 
-int http1_read_and_parse_request(int client_fd, char *buffer, size_t buffer_size, HttpRequest *req) {
+int http1_read_and_parse_request_ex(int client_fd,
+                                    char *buffer,
+                                    size_t buffer_size,
+                                    HttpRequest *req,
+                                    size_t *out_bytes_read) {
+    if (out_bytes_read) *out_bytes_read = 0;
     if (client_fd < 0 || !buffer || buffer_size == 0 || !req) {
         return -1;
     }
@@ -27,6 +32,8 @@ int http1_read_and_parse_request(int client_fd, char *buffer, size_t buffer_size
             break;
         }
     }
+
+    if (out_bytes_read) *out_bytes_read = filled;
 
     if (filled == 0) {
         return -1;
@@ -57,6 +64,7 @@ int http1_read_and_parse_request(int client_fd, char *buffer, size_t buffer_size
                 body_remaining -= (size_t)r;
                 buffer[filled] = '\0';
             }
+            if (out_bytes_read) *out_bytes_read = filled;
         }
     }
 
@@ -69,4 +77,8 @@ int http1_read_and_parse_request(int client_fd, char *buffer, size_t buffer_size
     }
 
     return 0;
+}
+
+int http1_read_and_parse_request(int client_fd, char *buffer, size_t buffer_size, HttpRequest *req) {
+    return http1_read_and_parse_request_ex(client_fd, buffer, buffer_size, req, NULL);
 }

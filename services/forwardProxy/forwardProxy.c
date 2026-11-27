@@ -6,6 +6,7 @@
 #include <sys/select.h>
 #include <unistd.h>
 #include "../../utils/toolkit.h"
+#include "../../utils/vsi_metrics.h"
 #include "../../http1_x/outboundEngine.h"
 #include "../../http1_x/http1_codec.h"
 
@@ -13,22 +14,27 @@
 #define HOST_SIZE 64
 #define PORT_SIZE 8
 
-
-void handle_request_through_tunnel(int clientfd,int outstream_fd) {
+static void handle_request_through_tunnel_tracked(int clientfd,
+                                                  int outstream_fd,
+                                                  size_t *out_bytes_in,
+                                                  size_t *out_bytes_out) {
+    if (out_bytes_in) *out_bytes_in = 0;
+    if (out_bytes_out) *out_bytes_out = 0;
     if (clientfd < 0 || outstream_fd < 0) {
         return;
     }
+
     char buffer[TUNNEL_BUFFER_SIZE];
     fd_set read_fds;
     int max_fd = (clientfd > outstream_fd) ? clientfd : outstream_fd;
-    //int min_fd = (clientfd < outstream_fd) ? clientfd : outstream_fd;
-    //int cc = 0;
+    size_t tunnel_in = 0;
+    size_t tunnel_out = 0;
+
     while (1) {
         FD_ZERO(&read_fds);
         FD_SET(clientfd, &read_fds);
         FD_SET(outstream_fd, &read_fds);
-        int triggered = select(max_fd+1,&read_fds,NULL,NULL,NULL);
-        //printf("transaction count is %d\n",++cc);
+        int triggered = select(max_fd + 1, &read_fds, NULL, NULL, NULL);
         if (triggered < 0) {
             perror("select error");
             break;
@@ -38,14 +44,14 @@ void handle_request_through_tunnel(int clientfd,int outstream_fd) {
             if (r <= 0) {
                 break; // Client closed connection or error
             }
-            //print_tls_handshake(buffer, (size_t)r);
             size_t written = 0;
             while (written < (size_t)r) {
                 ssize_t w = write(outstream_fd, buffer + written, (size_t)r - written);
                 if (w <= 0) {
-                    return;
+                    goto tunnel_done;
                 }
                 written += (size_t)w;
+                tunnel_in += (size_t)w;
             }
         }
         if (FD_ISSET(outstream_fd, &read_fds)) {
@@ -53,23 +59,28 @@ void handle_request_through_tunnel(int clientfd,int outstream_fd) {
             if (r <= 0) {
                 break; // Upstream closed connection or error
             }
-            //print_tls_handshake(buffer, (size_t)r);
             size_t written = 0;
             while (written < (size_t)r) {
                 ssize_t w = write(clientfd, buffer + written, (size_t)r - written);
                 if (w <= 0) {
-                    return;
+                    goto tunnel_done;
                 }
                 written += (size_t)w;
+                tunnel_out += (size_t)w;
             }
         }
-
     }
-    //readclientfd -> write outstremfd
-    //read outstreamfd -> write clientfd
 
+tunnel_done:
+    if (out_bytes_in) *out_bytes_in = tunnel_in;
+    if (out_bytes_out) *out_bytes_out = tunnel_out;
 }
-void handle_request_through_http(int clientfd,int outstreamfd,HttpRequest *outbound_req) {
+
+void handle_request_through_tunnel(int clientfd, int outstream_fd) {
+    handle_request_through_tunnel_tracked(clientfd, outstream_fd, NULL, NULL);
+}
+
+int handle_request_through_http(int clientfd, int outstreamfd, HttpRequest *outbound_req) {
     char header_buf[4096];
     // Clear body from outbound_req temporarily so demapper only serializes headers
     const char *orig_body = outbound_req->body;
@@ -78,42 +89,83 @@ void handle_request_through_http(int clientfd,int outstreamfd,HttpRequest *outbo
     outbound_req->body_len = 0;
 
     int header_len = request_demapper(outbound_req, header_buf, sizeof(header_buf));
-    if (outstreamfd >= 0) {
+    int relayed = -1;
+    if (outstreamfd >= 0 && header_len > 0) {
         // Relays headers from header_buf and streams original body with zero memory copies
-        outbound_relay_split(outstreamfd, clientfd, header_buf, header_len, orig_body, orig_body_len);
+        relayed = outbound_relay_split(outstreamfd, clientfd, header_buf, header_len, orig_body, orig_body_len);
+        outbound_close(outstreamfd);
+    } else if (outstreamfd >= 0) {
         outbound_close(outstreamfd);
     }
-
+    return relayed;
 }
-int handle_proxy_request(int clientfd,const HttpRequest *in_req) {
+
+static int handle_proxy_request_timed(int clientfd,
+                                      const HttpRequest *in_req,
+                                      uint64_t t0,
+                                      size_t *out_tunnel_in,
+                                      size_t *out_bytes_out,
+                                      uint64_t *out_latency_ns) {
+    if (out_tunnel_in) *out_tunnel_in = 0;
+    if (out_bytes_out) *out_bytes_out = 0;
+    if (out_latency_ns) *out_latency_ns = 0;
+
     if (!in_req || clientfd < 0) {
         return -1;
     }
+
     HttpRequest outbound_req;
     struct addrinfo *res = NULL;
     int transform_status = forward_proxy_transform_request(in_req, &outbound_req, &res);
     if (transform_status != 0 || !res) {
         return -1;
     }
+
     int outstream_fd = outbound_connect_tcp(res);
+    freeaddrinfo(res);
     if (outstream_fd < 0) {
-        freeaddrinfo(res);
         return -1;
     }
+
     if (strcmp(outbound_req.method, "CONNECT") == 0) {
         const char *ok_msg = "HTTP/1.1 200 Connection Established\r\n\r\n";
-        write(clientfd, ok_msg, strlen(ok_msg));
-        handle_request_through_tunnel(clientfd,outstream_fd);
-        close(outstream_fd);
-        freeaddrinfo(res);
-        return 0;
-    }
-    handle_request_through_http(clientfd,outstream_fd,&outbound_req);
-    // handle_request_through_tunnel(clientfd,outstream_fd);
-    close(outstream_fd);
-    freeaddrinfo(res);
+        size_t ok_len = strlen(ok_msg);
+        ssize_t w = write(clientfd, ok_msg, ok_len);
+        size_t established_bytes = (w > 0) ? (size_t)w : 0;
 
-    return 0;
+        // Capture tunnel setup latency right as 200 Connection Established is sent
+        // (excludes arbitrary user idle/streaming time inside the tunnel)
+        if (out_latency_ns && t0 > 0) {
+            uint64_t t_setup = vsi_now_ns();
+            *out_latency_ns = (t_setup > t0) ? (t_setup - t0) : 0;
+        }
+
+        size_t tunnel_in = 0;
+        size_t tunnel_out = 0;
+        if (w > 0) {
+            handle_request_through_tunnel_tracked(clientfd, outstream_fd, &tunnel_in, &tunnel_out);
+        }
+        close(outstream_fd);
+
+        if (out_tunnel_in) *out_tunnel_in = tunnel_in;
+        if (out_bytes_out) *out_bytes_out = established_bytes + tunnel_out;
+        return (w > 0) ? 0 : -1;
+    }
+
+    int relayed = handle_request_through_http(clientfd, outstream_fd, &outbound_req);
+    if (out_latency_ns && t0 > 0) {
+        uint64_t t_end = vsi_now_ns();
+        *out_latency_ns = (t_end > t0) ? (t_end - t0) : 0;
+    }
+    if (out_bytes_out && relayed > 0) {
+        *out_bytes_out = (size_t)relayed;
+    }
+
+    return (relayed >= 0) ? 0 : -1;
+}
+
+int handle_proxy_request(int clientfd, const HttpRequest *in_req) {
+    return handle_proxy_request_timed(clientfd, in_req, 0, NULL, NULL, NULL);
 }
 
 void forward_proxy_on_connection(int client_fd, void *user_ctx) {
@@ -122,12 +174,28 @@ void forward_proxy_on_connection(int client_fd, void *user_ctx) {
         return;
     }
 
+    vsi_metrics_conn_open();
+    uint64_t t0 = vsi_now_ns();
+    size_t req_bytes_in = 0;
+    size_t tunnel_in = 0;
+    size_t bytes_out = 0;
+    uint64_t elapsed_ns = 0;
+    int failed = 0;
+
     char buffer[HTTP1_READ_BUFFER_SIZE];
     HttpRequest req;
 
-    if (http1_read_and_parse_request(client_fd, buffer, sizeof(buffer), &req) == 0) {
-        handle_proxy_request(client_fd, &req);
+    if (http1_read_and_parse_request_ex(client_fd, buffer, sizeof(buffer), &req, &req_bytes_in) == 0) {
+        if (handle_proxy_request_timed(client_fd, &req, t0, &tunnel_in, &bytes_out, &elapsed_ns) != 0) {
+            failed = 1;
+        }
+    } else {
+        elapsed_ns = vsi_now_ns() - t0;
+        failed = 1;
     }
+
+    vsi_metrics_record_request(req_bytes_in + tunnel_in, bytes_out, elapsed_ns, 0, elapsed_ns, failed);
+    vsi_metrics_conn_close();
 
     close(client_fd);
 }
